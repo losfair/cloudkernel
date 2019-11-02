@@ -8,19 +8,41 @@
 #include <iostream>
 #include <thread>
 #include <signal.h>
+#include <string.h>
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/registry.h>
 #include <ck-hypervisor/linking.h>
 #include <ck-hypervisor/config.h>
+#include <ck-hypervisor/process_api.h>
 #include <regex>
 #include <pthread.h>
 
-static int send_reject(int socket) {
-    uint32_t buf = (uint32_t) MessageType::MODULE_REJECT;
+static int send_ok(int socket) {
+    uint32_t buf = (uint32_t) MessageType::OK;
     return send(socket, (void *) &buf, sizeof(buf), 0);
 }
 
-Process::Process(const std::vector<std::string>& args) {
+static int send_reject(int socket) {
+    uint32_t buf = (uint32_t) MessageType::REJECT;
+    return send(socket, (void *) &buf, sizeof(buf), 0);
+}
+
+static int send_reject(int socket, const char *reason, size_t reason_len) {
+    std::vector<std::uint8_t> buf(4 + reason_len);
+    * (uint32_t *) &buf[0] = (uint32_t) MessageType::REJECT;
+    std::copy((const uint8_t *) reason, (const uint8_t *) reason + reason_len, &buf[4]);
+    return send(socket, (void *) &buf[0], buf.size(), 0);
+}
+
+static int send_reject(int socket, const char *reason) {
+    return send_reject(socket, reason, strlen(reason));
+}
+
+Process::Process(const std::vector<std::string>& new_args) {
+    args = new_args;
+}
+
+void Process::run() {
     int sockets[2];
 
     if(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) < 0) {
@@ -63,20 +85,19 @@ Process::Process(const std::vector<std::string>& args) {
     } else {
         close(sockets[1]);
         socket = sockets[0];
-        pid = new_pid;
+        os_pid = new_pid;
 
         socket_listener = std::thread([this]() {
             serve_sandbox();
+            global_process_set.notify_termination(this->ck_pid);
         });
     }
 }
 
 Process::~Process() {
-    if(!no_kill_at_destruction) {
-        kill(pid, SIGKILL);
-        int wstatus;
-        waitpid(pid, &wstatus, 0);
-    }
+    kill(os_pid, SIGKILL);
+    int wstatus;
+    waitpid(os_pid, &wstatus, 0);
 
     socket_listener.join();
 
@@ -96,7 +117,6 @@ void Process::serve_sandbox() {
         if(n_bytes <= 0) {
             break;
         }
-        std::lock_guard<std::mutex> lg(this->mu);
 
         uint8_t *buf = &m_buf[0];
         size_t rem = n_bytes;
@@ -112,55 +132,112 @@ void Process::serve_sandbox() {
                 buf += 4; rem -= 4;
 
                 if(full_name_len == 0 || rem < full_name_len) break;
-                std::string full_name(full_name_len, '\0');
-                std::copy((char *) buf, (char *) buf + full_name_len, &full_name[0]);
-                std::regex re("(.+)_([0-9]+).([0-9]+).([0-9]+)");
-                std::cmatch cm;
-                if(!std::regex_match(full_name.c_str(), cm, re)) {
-                    std::cout << "Regex match failed." << std::endl;
-                    std::move(lg);
-                    send_reject(socket);
-                } else {
-                    if(cm.size() != 5) {
-                        std::cout << "invalid CM size: "  << cm.size() << std::endl;
-                        std::move(lg);
-                        send_reject(socket);
-                        break;
-                    }
-                    std::string module_name(cm[1].str());
-                    VersionCode version_code;
-                    std::stringstream ss;
-                    ss << cm[2] << ' ' << cm[3] << ' ' << cm[4];
-                    ss >> version_code.major >> version_code.minor >> version_code.patch;
-                    std::shared_ptr<DynamicModule> dm;
-                    try {
-                        dm = DynamicModule::load_cached(module_name.c_str(), version_code);
-                    } catch(std::runtime_error& e) {
-                        std::cout << "Error while trying to get module '" << module_name << "': " << e.what() << std::endl;
-                        std::move(lg);
-                        send_reject(socket);
-                        break;
-                    }
-
-                    std::vector<uint8_t> out(4 + dm->metadata.serialized.size());
-                    * (uint32_t *) &out[0] = (uint32_t) dm->metadata.serialized.size();
-                    std::copy(dm->metadata.serialized.begin(), dm->metadata.serialized.end(), &out[4]);
-
-                    Message msg;
-                    msg.ty = MessageType::MODULE_OFFER;
-                    msg.body = &out[0];
-                    msg.body_len = out.size();
-                    msg.fd = dm->mfd;
-
-                    std::move(lg);
-                    if(msg.send(socket) < 0) {
-                        std::cout << "Error while trying to send memfd to sandbox" << std::endl;
-                        break;
-                    }
+                std::string full_name((const char *) buf, full_name_len);
+                auto maybe_name_info = parse_module_full_name(full_name.c_str());
+                if(!maybe_name_info) {
+                    std::cout << "Invalid module full name: " << full_name << std::endl;
+                    send_reject(socket, "invalid module name");
+                    break;
                 }
+                auto name_info = std::move(maybe_name_info.value());
+                auto module_name = std::move(name_info.first);
+                auto version_code = name_info.second;
+                std::shared_ptr<DynamicModule> dm;
+                try {
+                    dm = DynamicModule::load_cached(module_name.c_str(), version_code);
+                } catch(std::runtime_error& e) {
+                    std::cout << "Error while trying to get module '" << module_name << "': " << e.what() << std::endl;
+                    send_reject(socket, "missing/invalid module");
+                    break;
+                }
+
+                std::vector<uint8_t> out(4 + dm->metadata.serialized.size());
+                * (uint32_t *) &out[0] = (uint32_t) dm->metadata.serialized.size();
+                std::copy(dm->metadata.serialized.begin(), dm->metadata.serialized.end(), &out[4]);
+
+                Message msg;
+                msg.ty = MessageType::MODULE_OFFER;
+                msg.body = &out[0];
+                msg.body_len = out.size();
+                msg.fd = dm->mfd;
+
+                if(msg.send(socket) < 0) {
+                    std::cout << "Error while trying to send memfd to sandbox" << std::endl;
+                    break;
+                }
+                break;
+            }
+            case MessageType::PROCESS_CREATE: {
+                if(rem < sizeof(ProcessCreationInfo)) {
+                    send_reject(socket);
+                    break;
+                }
+
+                ProcessCreationInfo info;
+                std::copy(buf, buf + sizeof(ProcessCreationInfo), (uint8_t *) &info);
+
+                if(info.api_version != APIVER_ProcessCreationInfo) {
+                    send_reject(socket);
+                    break;
+                }
+
+                info.full_name[sizeof(info.full_name) - 1] = '\0';
+
+                std::shared_ptr<Process> new_proc(new Process({ std::string(info.full_name) }));
+                new_proc->parent_ck_pid = this->ck_pid;
+                new_proc->privileged = this->privileged && info.privileged;
+
+                global_process_set.attach_process(new_proc);
+                new_proc->run();
+
+                send_ok(socket);
+                break;
+            }
+            case MessageType::DEBUG_PRINT: {
+                std::string message((const char *) buf, rem);
+                std::cout << "[" << stringify_ck_pid(this->ck_pid) << "] " << message << std::endl;
                 break;
             }
             default: break; // invalid tag
         }
     }
 }
+
+ProcessSet::ProcessSet() : pid_rand_gen(pid_rand_dev()) {
+
+}
+
+ProcessSet::~ProcessSet() {
+
+}
+
+ck_pid_t ProcessSet::next_pid_locked() {
+    std::uniform_int_distribution<uint64_t> dist;
+    uint64_t lower = dist(pid_rand_gen), upper = dist(pid_rand_gen);
+    return (((__uint128_t) lower) | (((__uint128_t) upper) << 64));
+}
+
+ck_pid_t ProcessSet::attach_process(std::shared_ptr<Process> proc) {
+    std::lock_guard<std::mutex> lg(this->mu);
+
+    auto pid = next_pid_locked();
+    proc->ck_pid = pid;
+    processes[pid] = std::move(proc);
+
+    return pid;
+}
+
+std::shared_ptr<Process> ProcessSet::get_process(ck_pid_t pid) {
+    std::lock_guard<std::mutex> lg(this->mu);
+    auto it = processes.find(pid);
+    if(it != processes.end()) return it->second;
+    else return std::shared_ptr<Process>();
+}
+
+void ProcessSet::notify_termination(ck_pid_t pid) {
+    std::lock_guard<std::mutex> lg(this->mu);
+    auto it = processes.find(pid);
+    if(it != processes.end()) processes.erase(it);
+}
+
+ProcessSet global_process_set;

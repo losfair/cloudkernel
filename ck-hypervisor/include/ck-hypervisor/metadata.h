@@ -5,23 +5,7 @@
 #include <vector>
 #include <string>
 #include <functional>
-
-class VersionCode {
-    public:
-    int major = 0, minor = 0, patch = 0;
-    inline bool operator < (const VersionCode& that) const {
-        if(major < that.major) return true;
-        else if(major > that.major) return false;
-
-        if(minor < that.minor) return true;
-        else if(minor > that.minor) return false;
-
-        if(patch < that.patch) return true;
-        else if(patch > that.patch) return false;
-
-        return false;
-    }
-};
+#include <ck-hypervisor/module.h>
 
 class ModuleMetadata {
     public:

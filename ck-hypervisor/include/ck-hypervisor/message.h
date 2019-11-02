@@ -8,7 +8,11 @@ enum class MessageType {
     INVALID = 0,
     MODULE_REQUEST,
     MODULE_OFFER,
-    MODULE_REJECT,
+    REJECT,
+    PROCESS_CREATE,
+    PROCESS_OFFER,
+    DEBUG_PRINT,
+    OK,
 };
 
 class Message {

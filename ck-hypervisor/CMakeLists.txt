@@ -8,6 +8,8 @@ file(GLOB SANDBOX_SOURCES "sandbox/*.cpp")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_COMPILER clang-8)
 set(CMAKE_CXX_COMPILER clang++-8)
+set(CMAKE_C_FLAGS -Wall)
+set(CMAKE_CXX_FLAGS -Wall)
 
 set_source_files_properties(${SANDBOX_SOURCES} PROPERTIES COMPILE_FLAGS "-static" )
 

@@ -57,7 +57,7 @@ std::unique_ptr<ModuleHandle> Registry::get_module(const char *name, VersionCode
     handle->metadata.name = name;
     handle->metadata.version = version;
 
-    return std::move(handle);
+    return handle;
 }
 
 Registry global_registry;

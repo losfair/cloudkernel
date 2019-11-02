@@ -64,6 +64,6 @@ std::shared_ptr<DynamicModule> DynamicModule::load_cached(const char *name, Vers
     } else {
         auto v = std::shared_ptr<DynamicModule>(new DynamicModule(name, version));
         dm_cache[key] = v;
-        return std::move(v);
+        return v;
     }
 }
