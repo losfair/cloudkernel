@@ -1,12 +1,11 @@
-#include <ck/import.h>
+#include <ck/polyfill.h>
+
+#include <ck/debug.h>
 #include <string.h>
 
 int _start() {
-    const char *message1 = "Hello, world!";
-    kDebugLog((unsigned long) message1, strlen(message1));
-
-    const char *message2 = "Hello, world! (2)";
-    kDebugLog((unsigned long) message2, strlen(message2));
+    DebugLog("Hello, world!");
+    DebugLog("Hello, world! (2)");
 
     return 0;
 }

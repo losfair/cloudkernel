@@ -1,0 +1,12 @@
+#pragma once
+
+enum MessageType {
+    MSG_INVALID = 0,
+    MSG_MODULE_REQUEST,
+    MSG_MODULE_OFFER,
+    MSG_REJECT,
+    MSG_PROCESS_CREATE,
+    MSG_PROCESS_OFFER,
+    MSG_DEBUG_PRINT,
+    MSG_OK,
+};

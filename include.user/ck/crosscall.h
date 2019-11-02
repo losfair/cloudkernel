@@ -30,4 +30,5 @@ unsigned long __attribute__((naked)) fixup_syscall(const char *name, void *data)
         return (f ? f : ((int (*) (unsigned long, unsigned long)) fixup_syscall(__sysname__, (void *) &f)))(a, b); \
     }
 
-CROSSCALL2(kDebugLog, "kernel_0.0.0/DebugLog");
+CROSSCALL2(kSendMessage, "kernel_0.0.0/SendMessage");
+CROSSCALL2(kRecvMessage, "kernel_0.0.0/RecvMessage");

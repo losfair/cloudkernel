@@ -4,7 +4,7 @@ import re
 import struct
 import tempfile
 
-ELF64_BASE = 0
+ELF64_BASE = 0x60000000
 
 target = sys.argv[1]
 outfile = sys.argv[2]
@@ -33,7 +33,7 @@ for s in syms:
     metadata += enc
 
 with tempfile.NamedTemporaryFile(mode = "rb") as f:
-    ret = subprocess.call(["objcopy", "-O", "binary", "-j", ".text", target, f.name])
+    ret = subprocess.call(["objcopy", "-O", "binary", target, f.name])
     if ret != 0:
         raise Exception("objcopy failed")
     result = metadata + f.read()
