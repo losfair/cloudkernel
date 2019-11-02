@@ -3,8 +3,9 @@ import subprocess
 import re
 import struct
 import tempfile
+import os
 
-ELF64_BASE = 0x60000000
+ELF64_BASE = int(os.getenv("ELF2CKM_ELF64_BASE", "0x60000000"), 16)
 
 target = sys.argv[1]
 outfile = sys.argv[2]
@@ -22,9 +23,10 @@ for row in out:
     row = row.strip()
     m = prog.match(row)
     if m != None:
-        syms.append((int(m[1], 16) - ELF64_BASE, m[2]))
-        s = syms[len(syms) - 1]
+        s = (int(m[1], 16) - ELF64_BASE, m[2])
         print("Symbol: " + hex(s[0]) + " " + s[1])
+        if s[1] == "_start":
+            syms.append(s)
 
 metadata += struct.pack("<I", len(syms))
 for s in syms:
