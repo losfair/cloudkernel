@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include <ck-hypervisor/symbol.h>
 #include <ck-hypervisor/metadata.h>
 
@@ -34,6 +35,7 @@ class ModuleHandle {
 
 class Registry {
     private:
+    std::mutex mu;
     std::string prefix;
 
     public:
@@ -43,7 +45,9 @@ class Registry {
     virtual ~Registry();
 
     inline void set_prefix(const std::string& new_prefix) {
+        mu.lock();
         prefix = new_prefix;
+        mu.unlock();
     }
 
     std::unique_ptr<ModuleHandle> get_module(const char *name, VersionCode version);

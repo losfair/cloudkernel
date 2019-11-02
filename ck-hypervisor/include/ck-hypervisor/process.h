@@ -4,9 +4,11 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <mutex>
 
 class Process {
     private:
+    std::mutex mu;
     int pid;
     int socket;
     std::thread socket_listener;

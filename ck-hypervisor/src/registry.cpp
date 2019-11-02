@@ -44,6 +44,8 @@ Registry::~Registry() {}
 std::unique_ptr<ModuleHandle> Registry::get_module(const char *name, VersionCode version) {
     if(!validate_module_name(name)) throw std::runtime_error("invalid module name");
 
+    std::lock_guard<std::mutex> lg(this->mu);
+
     std::stringstream filename_builder;
     filename_builder << prefix << name << "_" << version.major << "." << version.minor << "." << version.patch << ".ckm";
     std::string filename = filename_builder.str();

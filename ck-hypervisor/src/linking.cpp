@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <map>
 #include <string>
+#include <mutex>
 #include <iostream>
 #include <string.h>
 
@@ -51,8 +52,11 @@ DynamicModule::~DynamicModule() {
 }
 
 static std::map<std::pair<std::string, VersionCode>, std::shared_ptr<DynamicModule>> dm_cache;
+static std::mutex dm_cache_mu;
 
 std::shared_ptr<DynamicModule> DynamicModule::load_cached(const char *name, VersionCode version) {
+    std::lock_guard<std::mutex> lg(dm_cache_mu);
+
     auto key = std::make_pair(std::string(name), version);
     auto it = dm_cache.find(key);
     if(it != dm_cache.end()) {

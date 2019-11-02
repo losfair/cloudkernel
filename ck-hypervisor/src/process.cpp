@@ -96,7 +96,7 @@ void Process::serve_sandbox() {
         if(n_bytes <= 0) {
             break;
         }
-        std::lock_guard<std::mutex> global_lg(global_lock);
+        std::lock_guard<std::mutex> lg(this->mu);
 
         uint8_t *buf = &m_buf[0];
         size_t rem = n_bytes;
@@ -118,12 +118,12 @@ void Process::serve_sandbox() {
                 std::cmatch cm;
                 if(!std::regex_match(full_name.c_str(), cm, re)) {
                     std::cout << "Regex match failed." << std::endl;
-                    std::move(global_lg);
+                    std::move(lg);
                     send_reject(socket);
                 } else {
                     if(cm.size() != 5) {
                         std::cout << "invalid CM size: "  << cm.size() << std::endl;
-                        std::move(global_lg);
+                        std::move(lg);
                         send_reject(socket);
                         break;
                     }
@@ -137,7 +137,7 @@ void Process::serve_sandbox() {
                         dm = DynamicModule::load_cached(module_name.c_str(), version_code);
                     } catch(std::runtime_error& e) {
                         std::cout << "Error while trying to get module '" << module_name << "': " << e.what() << std::endl;
-                        std::move(global_lg);
+                        std::move(lg);
                         send_reject(socket);
                         break;
                     }
@@ -152,7 +152,7 @@ void Process::serve_sandbox() {
                     msg.body_len = out.size();
                     msg.fd = dm->mfd;
 
-                    std::move(global_lg);
+                    std::move(lg);
                     if(msg.send(socket) < 0) {
                         std::cout << "Error while trying to send memfd to sandbox" << std::endl;
                         break;
