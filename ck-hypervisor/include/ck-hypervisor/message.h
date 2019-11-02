@@ -13,6 +13,7 @@ enum class MessageType {
     PROCESS_OFFER,
     DEBUG_PRINT,
     OK,
+    PROCESS_WAIT,
 };
 
 class Message {

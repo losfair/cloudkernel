@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <map>
+#include <functional>
 
 using ck_pid_t = __uint128_t;
 
@@ -17,6 +18,8 @@ class Process {
     int os_pid;
     int socket;
     std::thread socket_listener;
+    std::vector<std::function<void()>> awaiters;
+    std::mutex awaiters_mu;
 
     void serve_sandbox();
 
@@ -31,6 +34,7 @@ class Process {
     virtual ~Process();
 
     void run();
+    void add_awaiter(std::function<void()>&& awaiter);
 };
 
 class ProcessSet {
@@ -39,6 +43,7 @@ class ProcessSet {
     std::random_device pid_rand_dev;
     std::mt19937_64 pid_rand_gen;
     std::map<ck_pid_t, std::shared_ptr<Process>> processes;
+    std::vector<ck_pid_t> pending_termination;
 
     ck_pid_t next_pid_locked();
 
@@ -51,6 +56,7 @@ class ProcessSet {
     ck_pid_t attach_process(std::shared_ptr<Process> proc);
     std::shared_ptr<Process> get_process(ck_pid_t pid);
     void notify_termination(ck_pid_t pid);
+    void tick();
 };
 
 extern ProcessSet global_process_set;

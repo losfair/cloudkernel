@@ -7,6 +7,7 @@
 #include <string>
 #include <iostream>
 #include <thread>
+#include <future>
 #include <signal.h>
 #include <string.h>
 #include <ck-hypervisor/message.h>
@@ -102,6 +103,16 @@ Process::~Process() {
     socket_listener.join();
 
     close(socket);
+
+    {
+        std::lock_guard<std::mutex> lg(awaiters_mu);
+        for(auto& f : awaiters) f();
+    }
+}
+
+void Process::add_awaiter(std::function<void()>&& awaiter) {
+    std::lock_guard<std::mutex> lg(awaiters_mu);
+    awaiters.push_back(std::move(awaiter));
 }
 
 void Process::serve_sandbox() {
@@ -177,7 +188,7 @@ void Process::serve_sandbox() {
                 std::copy(buf, buf + sizeof(ProcessCreationInfo), (uint8_t *) &info);
 
                 if(info.api_version != APIVER_ProcessCreationInfo) {
-                    send_reject(socket);
+                    send_reject(socket, "api version mismatch");
                     break;
                 }
 
@@ -188,14 +199,43 @@ void Process::serve_sandbox() {
                 new_proc->privileged = this->privileged && info.privileged;
 
                 global_process_set.attach_process(new_proc);
+                auto new_pid = new_proc->ck_pid;
                 new_proc->run();
 
-                send_ok(socket);
+                ProcessOfferMessage offer;
+                offer.tag = (uint32_t) MessageType::PROCESS_OFFER;
+                offer.offer.api_version = APIVER_ProcessOffer;
+                offer.offer.pid = new_pid;
+                send(socket, (void *) &offer, sizeof(offer), 0);
                 break;
             }
             case MessageType::DEBUG_PRINT: {
                 std::string message((const char *) buf, rem);
                 std::cout << "[" << stringify_ck_pid(this->ck_pid) << "] " << message << std::endl;
+                break;
+            }
+            case MessageType::PROCESS_WAIT: {
+                if(rem < sizeof(ProcessWait)) {
+                    send_reject(socket);
+                    break;
+                }
+
+                ProcessWait info;
+                std::copy(buf, buf + sizeof(ProcessWait), (uint8_t *) &info);
+
+                auto remote_proc = global_process_set.get_process(info.pid);
+                if(!remote_proc) {
+                    send_reject(socket, "process not found");
+                    break;
+                }
+
+                std::promise<void> ch;
+                std::future<void> ch_fut;
+                remote_proc->add_awaiter([&]() {
+                    ch.set_value();
+                });
+                ch_fut.wait();
+                send_ok(socket);
                 break;
             }
             default: break; // invalid tag
@@ -236,8 +276,17 @@ std::shared_ptr<Process> ProcessSet::get_process(ck_pid_t pid) {
 
 void ProcessSet::notify_termination(ck_pid_t pid) {
     std::lock_guard<std::mutex> lg(this->mu);
-    auto it = processes.find(pid);
-    if(it != processes.end()) processes.erase(it);
+    pending_termination.push_back(pid);
+}
+
+void ProcessSet::tick() {
+    std::lock_guard<std::mutex> lg(this->mu);
+
+    for(auto pid : pending_termination) {
+        auto it = processes.find(pid);
+        if(it != processes.end()) processes.erase(it);
+    }
+    pending_termination.clear();
 }
 
 ProcessSet global_process_set;

@@ -29,7 +29,8 @@ int main(int argc, const char *argv[]) {
     init_proc->run();
 
     while(true) {
-        sleep(1);
+        usleep(50000); // 50ms
+        global_process_set.tick();
         if(global_process_set.get_process(ck_pid) == nullptr) break;
     }
 
