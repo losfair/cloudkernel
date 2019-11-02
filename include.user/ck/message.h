@@ -9,4 +9,5 @@ enum MessageType {
     MSG_PROCESS_OFFER,
     MSG_DEBUG_PRINT,
     MSG_OK,
+    MSG_PROCESS_WAIT,
 };
