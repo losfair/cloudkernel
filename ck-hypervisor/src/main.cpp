@@ -4,7 +4,6 @@
 #include <vector>
 #include <string>
 #include <unistd.h>
-#include <ck-hypervisor/sandbox.h>
 #include <ck-hypervisor/process.h>
 #include <ck-hypervisor/registry.h>
 
