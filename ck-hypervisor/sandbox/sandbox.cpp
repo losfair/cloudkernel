@@ -1,4 +1,3 @@
-#include <ck-hypervisor/sandbox.h>
 #include <ck-hypervisor/metadata.h>
 #include <ck-hypervisor/message.h>
 #include <stdio.h>
@@ -19,13 +18,11 @@
 #include <regex>
 #include <memory>
 
-#include "kernel.h"
-
-#define TEXT_BASE 0x60000000ull
-#define STACK_TOP 0x8000000000ull
+#include "cc.h"
 
 int hypervisor_fd = -1;
-static unsigned long text_end = TEXT_BASE;
+unsigned long text_end = TEXT_BASE;
+unsigned long mmap_end = MMAP_BASE;
 
 struct MapInfo {
     std::string full_name;
@@ -91,10 +88,10 @@ struct SharedModule {
         }
 
         mapping = mmap(base, image_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_FIXED, mfd, 0);
-        if(!mapping) throw std::runtime_error("mmap failed");
+        if(mapping == MAP_FAILED) throw std::runtime_error("mmap failed");
 
         bss_mapping = mmap((void *) ((uint8_t *) base + image_size), bss_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if(!bss_mapping) throw std::runtime_error("bss mmap failed");
+        if(bss_mapping == MAP_FAILED) throw std::runtime_error("bss mmap failed");
 
         MapInfo info;
         info.full_name = this->full_name;
@@ -182,7 +179,6 @@ void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
     switch(syscall_id) {
         case 20000: {
             const char *name = (const char *) ucontext->uc_mcontext.gregs[REG_RDI];
-            void **out = (void **) ucontext->uc_mcontext.gregs[REG_RSI];
             std::regex re("(.+)_([0-9]+).([0-9]+).([0-9]+)\\/(.+)");
             std::cmatch cm;
             if(!std::regex_match(name, cm, re) || cm.size() != 6) {
@@ -192,15 +188,18 @@ void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
             if(module_name == "kernel") {
                 // special case for kernel
                 std::string func_name = cm[5].str();
-                if(func_name == "DebugLog") {
-                    *out = (void *) kDebugLog;
-                    retval = (long) *out;
-                } else if(func_name == "SendMessage") {
-                    *out = (void *) kSendMessage;
-                    retval = (long) *out;
+                if(func_name == "SendMessage") {
+                    retval = (long) kSendMessage;
                 } else if(func_name == "RecvMessage") {
-                    *out = (void *) kRecvMessage;
-                    retval = (long) *out;
+                    retval = (long) kRecvMessage;
+                } else {
+                    abort();
+                }
+            } else if(module_name == "user") {
+                // special case for user
+                std::string func_name = cm[5].str();
+                if(func_name == "MapHeap") {
+                    retval = (long) uMapHeap;
                 } else {
                     abort();
                 }
@@ -244,6 +243,15 @@ void enforce_security_policies() {
     }
 }
 
+static unsigned long __attribute__((naked, noreturn)) enter_user_program(void *stack, int (*f)()) {
+    asm(
+        "mov %rdi, %rsp\n"
+        "call *%rsi\n"
+        "call _exit\n"
+        "ud2\n"
+    );
+}
+
 int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
     hypervisor_fd = new_hypervisor_fd;
     signal(SIGSYS, (void (*) (int)) handle_sigsys);
@@ -271,10 +279,13 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
     StartFunc start_fn = (StartFunc) start_addr;
     std::cout << "start_address: " << (void *) start_fn << std::endl;
 
-    enforce_security_policies();
-    _exit(start_fn());
+    if(mmap((void *) (STACK_TOP - STACK_SIZE), STACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) == MAP_FAILED) {
+        std::cout << "Unable to allocate stack" << std::endl;
+        return 1;
+    }
 
-    return 0;
+    enforce_security_policies();
+    enter_user_program((void *) STACK_TOP, start_fn);
 }
 
 int main(int argc, const char *argv[]) {
