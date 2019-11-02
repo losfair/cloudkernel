@@ -21,10 +21,10 @@
 
 #include "kernel.h"
 
-#define TEXT_BASE 0x3200000000ull
+#define TEXT_BASE 0x60000000ull
 #define STACK_TOP 0x8000000000ull
 
-static int hypervisor_fd = -1;
+int hypervisor_fd = -1;
 static unsigned long text_end = TEXT_BASE;
 
 struct MapInfo {
@@ -37,15 +37,18 @@ static std::map<unsigned long, MapInfo> maps;
 struct SharedModule {
     int mfd = -1;
     void *mapping = nullptr;
+    void *bss_mapping = nullptr;
     ModuleMetadata metadata;
     std::string full_name;
     size_t image_size = 0;
+    size_t bss_size = 1048576ul * 16; // 16MB virtual memory for bss
 
     SharedModule() {}
     SharedModule(const SharedModule& that) = delete;
     SharedModule(SharedModule&& that) = delete;
 
     virtual ~SharedModule() {
+        if(bss_mapping) munmap(bss_mapping, bss_size);
         if(mapping) {
             auto it = maps.find((unsigned long) mapping);
             if(it != maps.end()) {
@@ -90,9 +93,12 @@ struct SharedModule {
         mapping = mmap(base, image_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_FIXED, mfd, 0);
         if(!mapping) throw std::runtime_error("mmap failed");
 
+        bss_mapping = mmap((void *) ((uint8_t *) base + image_size), bss_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if(!bss_mapping) throw std::runtime_error("bss mmap failed");
+
         MapInfo info;
         info.full_name = this->full_name;
-        info.size = image_size;
+        info.size = image_size + bss_size;
 
         maps[(unsigned long) mapping] = info;
     }
@@ -139,7 +145,7 @@ struct SharedModule {
             }
 
             MessageType ty = (MessageType) (* (uint32_t *) &m_buffer[0]);
-            if(ty == MessageType::MODULE_REJECT) {
+            if(ty == MessageType::REJECT) {
                 throw std::runtime_error("module request rejected");
             } else if(ty == MessageType::MODULE_OFFER) {
                 if(n_bytes < 8) throw std::runtime_error("invalid module offer");
@@ -176,12 +182,10 @@ void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
     switch(syscall_id) {
         case 20000: {
             const char *name = (const char *) ucontext->uc_mcontext.gregs[REG_RDI];
-            printf("crosscall_resolve: %s\n", name);
             void **out = (void **) ucontext->uc_mcontext.gregs[REG_RSI];
             std::regex re("(.+)_([0-9]+).([0-9]+).([0-9]+)\\/(.+)");
             std::cmatch cm;
             if(!std::regex_match(name, cm, re) || cm.size() != 6) {
-                printf("Invalid import name\n");
                 abort();
             }
             std::string module_name = cm[1].str();
@@ -190,6 +194,12 @@ void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
                 std::string func_name = cm[5].str();
                 if(func_name == "DebugLog") {
                     *out = (void *) kDebugLog;
+                    retval = (long) *out;
+                } else if(func_name == "SendMessage") {
+                    *out = (void *) kSendMessage;
+                    retval = (long) *out;
+                } else if(func_name == "RecvMessage") {
+                    *out = (void *) kRecvMessage;
                     retval = (long) *out;
                 } else {
                     abort();
@@ -200,7 +210,7 @@ void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
             break;
         }
         default:
-            printf("Unknown syscall: %d\n", syscall_id);
+            //printf("Unknown syscall: %d\n", syscall_id);
             break;
     }
 
@@ -217,16 +227,16 @@ void enforce_security_policies() {
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigreturn), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit_group), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(read), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(close), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendmsg), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendto), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvfrom), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvmsg), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(munmap), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mprotect), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(brk), 0);
-    //seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(lseek), 0);
+
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(read), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write), 0);
 
     if(seccomp_load(ctx) < 0) {
         std::cout << "unable to initialize seccomp" << std::endl;
@@ -253,7 +263,7 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
     std::cout << "image_size: " << init_mod.image_size << std::endl;
 
     init_mod.setup_mapping((void *) text_end);
-    text_end += init_mod.image_size;
+    text_end += init_mod.image_size + init_mod.bss_size;
 
     void *start_addr = init_mod.resolve_symbol("_start");
 
