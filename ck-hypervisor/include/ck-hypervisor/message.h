@@ -2,7 +2,6 @@
 
 #include <stdint.h>
 #include <sys/socket.h>
-#include <vector>
 
 enum class MessageType {
     INVALID = 0,
@@ -18,20 +17,30 @@ enum class MessageType {
 
 class Message {
     public:
-    MessageType ty;
+    __uint128_t sender_or_recipient = 0;
+    uint64_t session = 0;
+    MessageType tag = MessageType::INVALID;
     const uint8_t *body = nullptr;
     size_t body_len = 0;
     int fd = -1;
 
     int send(int socket) {
-        std::vector<uint8_t> payload(4 + this->body_len);
-        * (uint32_t *) &payload[0] = (uint32_t) this->ty;
-        std::copy(this->body, this->body + this->body_len, &payload[4]);
+        uint32_t raw_tag = (uint32_t) tag;
 
-        struct iovec out_iov = { .iov_base = &payload[0], .iov_len = payload.size() };
+        struct iovec parts[4];
+
+        parts[0].iov_base = (void *) &sender_or_recipient;
+        parts[0].iov_len = sizeof(__uint128_t);
+        parts[1].iov_base = (void *) &session;
+        parts[1].iov_len = sizeof(uint64_t);
+        parts[2].iov_base = (void *) &raw_tag;
+        parts[2].iov_len = sizeof(uint32_t);
+        parts[3].iov_base = (void *) body;
+        parts[3].iov_len = body_len;
+
         struct msghdr out_hdr = {
-            .msg_iov = &out_iov,
-            .msg_iovlen = 1,
+            .msg_iov = parts,
+            .msg_iovlen = 4
         };
         char fdbuf[CMSG_SPACE(sizeof(int))] = {};
 
@@ -47,6 +56,6 @@ class Message {
             *((int *) CMSG_DATA(cmsg)) = this->fd;
         }
 
-        return sendmsg(socket, &out_hdr, 0);
+        return sendmsg(socket, &out_hdr, 0) <= 0 ? -1 : 0;
     }
 };

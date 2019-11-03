@@ -19,20 +19,23 @@
 #include <pthread.h>
 
 static int send_ok(int socket) {
-    uint32_t buf = (uint32_t) MessageType::OK;
-    return send(socket, (void *) &buf, sizeof(buf), 0);
+    Message msg;
+    msg.tag = MessageType::OK;
+    return msg.send(socket);
 }
 
 static int send_reject(int socket) {
-    uint32_t buf = (uint32_t) MessageType::REJECT;
-    return send(socket, (void *) &buf, sizeof(buf), 0);
+    Message msg;
+    msg.tag = MessageType::REJECT;
+    return msg.send(socket);
 }
 
 static int send_reject(int socket, const char *reason, size_t reason_len) {
-    std::vector<std::uint8_t> buf(4 + reason_len);
-    * (uint32_t *) &buf[0] = (uint32_t) MessageType::REJECT;
-    std::copy((const uint8_t *) reason, (const uint8_t *) reason + reason_len, &buf[4]);
-    return send(socket, (void *) &buf[0], buf.size(), 0);
+    Message msg;
+    msg.tag = MessageType::REJECT;
+    msg.body = (const uint8_t *) reason;
+    msg.body_len = reason_len;
+    return msg.send(socket);
 }
 
 static int send_reject(int socket, const char *reason) {
@@ -56,8 +59,8 @@ void Process::run() {
     if(new_pid == 0) {
         close(sockets[0]);
         std::stringstream ss;
-        ss << sockets[1];
-        auto socket_id_str = ss.str();
+        ss << "CK_HYPERVISOR_FD=" << sockets[1];
+        auto socket_id_env_str = ss.str();
 
         int flags = fcntl(sockets[1], F_GETFD, 0);
         flags &= ~FD_CLOEXEC;
@@ -68,11 +71,16 @@ void Process::run() {
 
         std::vector<char *> args_exec;
         args_exec.push_back((char *) "ck-hypervisor-sandbox");
-        args_exec.push_back((char *) socket_id_str.c_str());
         for(auto& arg : args) {
             args_exec.push_back((char *) arg.c_str());
         }
         args_exec.push_back(nullptr);
+
+        std::vector<char *> envp_exec;
+        if(privileged) envp_exec.push_back((char *) "CK_PRIVILEGED=1");
+        else envp_exec.push_back((char *) "CK_PRIVILEGED=0");
+        envp_exec.push_back((char *) socket_id_env_str.c_str());
+        envp_exec.push_back(nullptr);
 
         if(setgid(65534) != 0 || setuid(65534) != 0) {
             std::cout << "unable to drop permissions" << std::endl;
@@ -81,7 +89,7 @@ void Process::run() {
                 exit(1);
             }
         }
-        execv("./ck-hypervisor-sandbox", &args_exec[0]);
+        execve("./ck-hypervisor-sandbox", &args_exec[0], &envp_exec[0]);
         exit(1);
     } else {
         close(sockets[1]);
@@ -115,130 +123,145 @@ void Process::add_awaiter(std::function<void()>&& awaiter) {
     awaiters.push_back(std::move(awaiter));
 }
 
+void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem) {
+    if(session != 0) {
+        send_reject(socket, "invalid kernel session");
+        return;
+    }
+    switch(tag) {
+        case MessageType::MODULE_REQUEST: {
+            std::string full_name((const char *) data, rem);
+            auto maybe_name_info = parse_module_full_name(full_name.c_str());
+            if(!maybe_name_info) {
+                std::cout << "Invalid module full name: " << full_name << std::endl;
+                send_reject(socket, "invalid module name");
+                break;
+            }
+            auto name_info = std::move(maybe_name_info.value());
+            auto module_name = std::move(name_info.first);
+            auto version_code = name_info.second;
+            std::shared_ptr<DynamicModule> dm;
+            try {
+                dm = DynamicModule::load_cached(module_name.c_str(), version_code);
+            } catch(std::runtime_error& e) {
+                std::cout << "Error while trying to get module '" << module_name << "': " << e.what() << std::endl;
+                send_reject(socket, "missing/invalid module");
+                break;
+            }
+
+            Message msg;
+            msg.tag = MessageType::MODULE_OFFER;
+            msg.body = dm->metadata.serialized.empty() ? nullptr : &dm->metadata.serialized[0];
+            msg.body_len = dm->metadata.serialized.size();
+            msg.fd = dm->mfd;
+
+            msg.send(socket);
+            break;
+        }
+        case MessageType::PROCESS_CREATE: {
+            if(rem < sizeof(ProcessCreationInfo)) {
+                send_reject(socket);
+                break;
+            }
+
+            ProcessCreationInfo info;
+            std::copy(data, data + sizeof(ProcessCreationInfo), (uint8_t *) &info);
+
+            if(info.api_version != APIVER_ProcessCreationInfo) {
+                send_reject(socket, "api version mismatch");
+                break;
+            }
+
+            info.full_name[sizeof(info.full_name) - 1] = '\0';
+
+            std::shared_ptr<Process> new_proc(new Process({ std::string(info.full_name) }));
+            new_proc->parent_ck_pid = this->ck_pid;
+            new_proc->privileged = this->privileged && info.privileged;
+
+            global_process_set.attach_process(new_proc);
+            auto new_pid = new_proc->ck_pid;
+            new_proc->run();
+
+            ProcessOffer offer;
+            offer.api_version = APIVER_ProcessOffer;
+            offer.pid = new_pid;
+            
+            Message offer_msg;
+            offer_msg.tag = MessageType::PROCESS_OFFER;
+            offer_msg.body = (const uint8_t *) &offer;
+            offer_msg.body_len = sizeof(offer);
+
+            offer_msg.send(socket);
+            break;
+        }
+        case MessageType::DEBUG_PRINT: {
+            std::string message((const char *) data, rem);
+            std::cout << "[" << stringify_ck_pid(this->ck_pid) << "] " << message << std::endl;
+            send_ok(socket);
+            break;
+        }
+        case MessageType::PROCESS_WAIT: {
+            if(rem < sizeof(ProcessWait)) {
+                send_reject(socket);
+                break;
+            }
+
+            ProcessWait info;
+            std::copy(data, data + sizeof(ProcessWait), (uint8_t *) &info);
+
+            auto remote_proc = global_process_set.get_process(info.pid);
+            if(!remote_proc) {
+                send_reject(socket, "process not found");
+                break;
+            }
+
+            std::promise<void> ch;
+            std::future<void> ch_fut;
+            remote_proc->add_awaiter([&]() {
+                ch.set_value();
+            });
+            ch_fut.wait();
+            send_ok(socket);
+            break;
+        }
+        default: break; // invalid tag
+    }
+}
+
 void Process::serve_sandbox() {
+    ck_pid_t recipient;
+    uint64_t session;
+    uint32_t raw_tag;
     std::vector<uint8_t> m_buf(65536);
-    struct iovec m_iov = { .iov_base = &m_buf[0], .iov_len = m_buf.size() };
+
+    struct iovec parts[4];
+    parts[0].iov_base = (void *) &recipient;
+    parts[0].iov_len = sizeof(ck_pid_t);
+    parts[1].iov_base = (void *) &session;
+    parts[1].iov_len = sizeof(uint64_t);
+    parts[2].iov_base = (void *) &raw_tag;
+    parts[2].iov_len = sizeof(uint32_t);
+    parts[3].iov_base = &m_buf[0];
+    parts[3].iov_len = m_buf.size();
+
+    const int header_size = sizeof(ck_pid_t) + sizeof(uint64_t) + sizeof(uint32_t);
 
     while(true) {
         struct msghdr msg = {
-            .msg_iov = &m_iov,
-            .msg_iovlen = 1,
+            .msg_iov = parts,
+            .msg_iovlen = 4,
         };
-        ssize_t n_bytes = recvmsg(socket, &msg, 0);
-        if(n_bytes <= 0) {
+        ssize_t size = recvmsg(socket, &msg, 0);
+        if(size < header_size) {
             break;
         }
+        size -= header_size;
 
-        uint8_t *buf = &m_buf[0];
-        size_t rem = n_bytes;
-
-        if(rem < 4) continue;
-        MessageType tag = (MessageType) (* (uint32_t *) buf);
-        buf += 4; rem -= 4;
-
-        switch(tag) {
-            case MessageType::MODULE_REQUEST: {
-                if(rem < 4) break;
-                uint32_t full_name_len = * (uint32_t *) buf;
-                buf += 4; rem -= 4;
-
-                if(full_name_len == 0 || rem < full_name_len) break;
-                std::string full_name((const char *) buf, full_name_len);
-                auto maybe_name_info = parse_module_full_name(full_name.c_str());
-                if(!maybe_name_info) {
-                    std::cout << "Invalid module full name: " << full_name << std::endl;
-                    send_reject(socket, "invalid module name");
-                    break;
-                }
-                auto name_info = std::move(maybe_name_info.value());
-                auto module_name = std::move(name_info.first);
-                auto version_code = name_info.second;
-                std::shared_ptr<DynamicModule> dm;
-                try {
-                    dm = DynamicModule::load_cached(module_name.c_str(), version_code);
-                } catch(std::runtime_error& e) {
-                    std::cout << "Error while trying to get module '" << module_name << "': " << e.what() << std::endl;
-                    send_reject(socket, "missing/invalid module");
-                    break;
-                }
-
-                std::vector<uint8_t> out(4 + dm->metadata.serialized.size());
-                * (uint32_t *) &out[0] = (uint32_t) dm->metadata.serialized.size();
-                std::copy(dm->metadata.serialized.begin(), dm->metadata.serialized.end(), &out[4]);
-
-                Message msg;
-                msg.ty = MessageType::MODULE_OFFER;
-                msg.body = &out[0];
-                msg.body_len = out.size();
-                msg.fd = dm->mfd;
-
-                if(msg.send(socket) < 0) {
-                    std::cout << "Error while trying to send memfd to sandbox" << std::endl;
-                    break;
-                }
-                break;
-            }
-            case MessageType::PROCESS_CREATE: {
-                if(rem < sizeof(ProcessCreationInfo)) {
-                    send_reject(socket);
-                    break;
-                }
-
-                ProcessCreationInfo info;
-                std::copy(buf, buf + sizeof(ProcessCreationInfo), (uint8_t *) &info);
-
-                if(info.api_version != APIVER_ProcessCreationInfo) {
-                    send_reject(socket, "api version mismatch");
-                    break;
-                }
-
-                info.full_name[sizeof(info.full_name) - 1] = '\0';
-
-                std::shared_ptr<Process> new_proc(new Process({ std::string(info.full_name) }));
-                new_proc->parent_ck_pid = this->ck_pid;
-                new_proc->privileged = this->privileged && info.privileged;
-
-                global_process_set.attach_process(new_proc);
-                auto new_pid = new_proc->ck_pid;
-                new_proc->run();
-
-                ProcessOfferMessage offer;
-                offer.tag = (uint32_t) MessageType::PROCESS_OFFER;
-                offer.offer.api_version = APIVER_ProcessOffer;
-                offer.offer.pid = new_pid;
-                send(socket, (void *) &offer, sizeof(offer), 0);
-                break;
-            }
-            case MessageType::DEBUG_PRINT: {
-                std::string message((const char *) buf, rem);
-                std::cout << "[" << stringify_ck_pid(this->ck_pid) << "] " << message << std::endl;
-                break;
-            }
-            case MessageType::PROCESS_WAIT: {
-                if(rem < sizeof(ProcessWait)) {
-                    send_reject(socket);
-                    break;
-                }
-
-                ProcessWait info;
-                std::copy(buf, buf + sizeof(ProcessWait), (uint8_t *) &info);
-
-                auto remote_proc = global_process_set.get_process(info.pid);
-                if(!remote_proc) {
-                    send_reject(socket, "process not found");
-                    break;
-                }
-
-                std::promise<void> ch;
-                std::future<void> ch_fut;
-                remote_proc->add_awaiter([&]() {
-                    ch.set_value();
-                });
-                ch_fut.wait();
-                send_ok(socket);
-                break;
-            }
-            default: break; // invalid tag
+        MessageType tag = (MessageType) raw_tag;
+        if(recipient == 0) {
+            handle_kernel_message(session, tag, &m_buf[0], size);
+        } else {
+            send_reject(socket, "recipient not found");
         }
     }
 }

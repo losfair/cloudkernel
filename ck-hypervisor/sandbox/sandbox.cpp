@@ -1,6 +1,7 @@
 #include <ck-hypervisor/metadata.h>
 #include <ck-hypervisor/message.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/prctl.h>
 #include <seccomp.h>
@@ -23,6 +24,7 @@
 int hypervisor_fd = -1;
 unsigned long text_end = TEXT_BASE;
 unsigned long mmap_end = MMAP_BASE;
+bool sandbox_privileged = false;
 
 struct MapInfo {
     std::string full_name;
@@ -101,52 +103,58 @@ struct SharedModule {
     }
 
     void fetch(const char *full_name) {
-        size_t full_name_len = strlen(full_name);
-
         {
-            std::vector<uint8_t> body(4 + full_name_len);
-            * (uint32_t *) &body[0] = full_name_len;
-            std::copy((const uint8_t *) full_name, (const uint8_t *) full_name + full_name_len, &body[4]);
-
             Message msg;
-            msg.ty = MessageType::MODULE_REQUEST;
-            msg.body = &body[0];
-            msg.body_len = body.size();
+            msg.tag = MessageType::MODULE_REQUEST;
+            msg.body = (const uint8_t *) full_name;
+            msg.body_len = strlen(full_name);
             int ret = msg.send(hypervisor_fd);
+            if(ret < 0) {
+                throw std::runtime_error("unable to send module request message");
+            }
         }
 
         {
-
+            ck_pid_t sender;
+            uint64_t session;
+            uint32_t raw_tag;
             std::vector<uint8_t> m_buffer(65536);
+            struct iovec parts[4];
 
-            struct msghdr msg = {};
-            struct iovec io = { .iov_base = &m_buffer[0], .iov_len = m_buffer.size() };
-            msg.msg_iov = &io;
-            msg.msg_iovlen = 1;
+            parts[0].iov_base = (void *) &sender;
+            parts[0].iov_len = sizeof(ck_pid_t);
+            parts[1].iov_base = (void *) &session;
+            parts[1].iov_len = sizeof(uint64_t);
+            parts[2].iov_base = (void *) &raw_tag;
+            parts[2].iov_len = sizeof(uint32_t);
+            parts[3].iov_base = (void *) &m_buffer[0];
+            parts[3].iov_len = m_buffer.size();
+
+            int header_len = parts[0].iov_len + parts[1].iov_len + parts[2].iov_len;
 
             char c_buffer[256];
-            msg.msg_control = c_buffer;
-            msg.msg_controllen = sizeof(c_buffer);
-            ssize_t n_bytes = recvmsg(hypervisor_fd, &msg, 0);
 
-            if (n_bytes <= 0) {
-                throw std::runtime_error("unable to receive message from hypervisor");
+            struct msghdr msg = {
+                .msg_iov = parts,
+                .msg_iovlen = 4,
+                .msg_control = c_buffer,
+                .msg_controllen = sizeof(c_buffer),
+            };
+
+            ssize_t n_bytes = recvmsg(hypervisor_fd, &msg, 0);
+            if(n_bytes < header_len) {
+                throw std::runtime_error("unable to receive module message");
             }
+            n_bytes -= header_len;
 
             struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg);
-
             uint8_t *cdata = CMSG_DATA(cmsg);
 
-            if(n_bytes < 4) {
-                throw std::runtime_error("invalid data from hypervisor");
-            }
-
-            MessageType ty = (MessageType) (* (uint32_t *) &m_buffer[0]);
-            if(ty == MessageType::REJECT) {
+            MessageType tag = (MessageType) raw_tag;
+            if(tag == MessageType::REJECT) {
                 throw std::runtime_error("module request rejected");
-            } else if(ty == MessageType::MODULE_OFFER) {
-                if(n_bytes < 8) throw std::runtime_error("invalid module offer");
-                int current = 8;
+            } else if(tag == MessageType::MODULE_OFFER) {
+                int current = 0;
                 metadata.parse([&](uint8_t *out, size_t n) -> int {
                     size_t n_copy = n_bytes - current < n ? n_bytes - current : n;
                     std::copy(&m_buffer[current], &m_buffer[current + n_copy], out);
@@ -217,25 +225,33 @@ void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
 }
 
 void enforce_security_policies() {
-    prctl(PR_SET_NO_NEW_PRIVS, 1);
-    prctl(PR_SET_DUMPABLE, 0);
+    //prctl(PR_SET_NO_NEW_PRIVS, 1);
+    //prctl(PR_SET_DUMPABLE, 0);
 
     scmp_filter_ctx ctx;
-    ctx = seccomp_init(SCMP_ACT_TRAP);
 
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigreturn), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit_group), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendto), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvfrom), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvmsg), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(munmap), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mprotect), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(brk), 0);
+    if(sandbox_privileged) {
+        std::cout << "Setting up privileged mode." << std::endl;
+        ctx = seccomp_init(SCMP_ACT_ALLOW);
+        seccomp_rule_add(ctx, SCMP_ACT_TRAP, 20000, 0);
+    } else {
+        ctx = seccomp_init(SCMP_ACT_TRAP);
 
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(read), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigreturn), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit_group), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendto), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvfrom), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendmsg), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvmsg), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(munmap), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mprotect), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(brk), 0);
+
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(read), 0);
+        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write), 0);
+    }
 
     if(seccomp_load(ctx) < 0) {
         std::cout << "unable to initialize seccomp" << std::endl;
@@ -289,9 +305,15 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
 }
 
 int main(int argc, const char *argv[]) {
-    if(argc < 3) {
-        abort();
-    }
-    int hypervisor_fd = atoi(argv[1]);
-    return sandbox_run(hypervisor_fd, argc - 2, &argv[2]);
+    if(argc < 2) abort();
+
+    const char *hypervisor_fd_s = getenv("CK_HYPERVISOR_FD");
+    const char *privileged = getenv("CK_PRIVILEGED");
+
+    if(!hypervisor_fd_s || !privileged) abort();
+
+    int hypervisor_fd = atoi(hypervisor_fd_s);
+    sandbox_privileged = strcmp(privileged, "1") == 0;
+
+    return sandbox_run(hypervisor_fd, argc - 1, &argv[1]);
 }

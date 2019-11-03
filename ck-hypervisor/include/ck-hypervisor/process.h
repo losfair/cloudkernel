@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <map>
 #include <functional>
+#include <ck-hypervisor/message.h>
 
 using ck_pid_t = __uint128_t;
 
@@ -22,6 +23,7 @@ class Process {
     std::mutex awaiters_mu;
 
     void serve_sandbox();
+    void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem);
 
     public:
     std::vector<std::string> args;
