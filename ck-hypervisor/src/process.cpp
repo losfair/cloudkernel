@@ -108,6 +108,7 @@ Process::~Process() {
     int wstatus;
     waitpid(os_pid, &wstatus, 0);
 
+    pthread_cancel(socket_listener.native_handle());
     socket_listener.join();
 
     close(socket);
