@@ -10,7 +10,10 @@
 #include <stdint.h>
 #include <map>
 #include <functional>
+#include <optional>
 #include <ck-hypervisor/message.h>
+#include <ck-hypervisor/bqueue.h>
+#include <ck-hypervisor/owned_message.h>
 
 using ck_pid_t = __uint128_t;
 
@@ -21,6 +24,7 @@ class Process {
     std::thread socket_listener;
     std::vector<std::function<void()>> awaiters;
     std::mutex awaiters_mu;
+    BQueue<OwnedMessage> pending_messages;
 
     void serve_sandbox();
     void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem);
@@ -45,6 +49,7 @@ class ProcessSet {
     std::random_device pid_rand_dev;
     std::mt19937_64 pid_rand_gen;
     std::map<ck_pid_t, std::shared_ptr<Process>> processes;
+    std::map<std::string, ck_pid_t> services;
     std::vector<ck_pid_t> pending_termination;
 
     ck_pid_t next_pid_locked();
@@ -57,6 +62,8 @@ class ProcessSet {
 
     ck_pid_t attach_process(std::shared_ptr<Process> proc);
     std::shared_ptr<Process> get_process(ck_pid_t pid);
+    bool register_service(std::string&& name, ck_pid_t pid);
+    std::optional<ck_pid_t> get_service(const char *name);
     void notify_termination(ck_pid_t pid);
     void tick();
 };
@@ -66,6 +73,6 @@ extern ProcessSet global_process_set;
 static inline std::string stringify_ck_pid(ck_pid_t pid) {
     const uint8_t *pid_bytes = (const uint8_t *) &pid;
     char out[33];
-    for(int i = 0; i < 16; i++) sprintf(out + i * 2, "%02x", pid_bytes[i]);
+    for(int i = 15; i >= 0; i--) sprintf(out + (15 - i) * 2, "%02x", pid_bytes[i]);
     return std::string(out, 32);
 }

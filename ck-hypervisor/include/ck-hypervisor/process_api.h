@@ -17,11 +17,6 @@ struct __attribute__((packed)) ProcessOffer {
     __uint128_t pid;
 };
 
-struct __attribute__((packed)) ProcessOfferMessage {
-    uint32_t tag;
-    ProcessOffer offer;
-};
-
 #define APIVER_ProcessWait 0x1
 
 struct __attribute__((packed)) ProcessWait {

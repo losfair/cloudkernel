@@ -2,17 +2,21 @@
 
 #include <stdint.h>
 #include <sys/socket.h>
+#include <string.h>
+#include <ck-hypervisor/consts.h>
 
 enum class MessageType {
     INVALID = 0,
+    TRIVIAL_RESULT,
     MODULE_REQUEST,
     MODULE_OFFER,
-    REJECT,
     PROCESS_CREATE,
     PROCESS_OFFER,
     DEBUG_PRINT,
-    OK,
     PROCESS_WAIT,
+    POLL,
+    SERVICE_REGISTER,
+    SERVICE_GET,
 };
 
 class Message {
@@ -57,5 +61,39 @@ class Message {
         }
 
         return sendmsg(socket, &out_hdr, 0) <= 0 ? -1 : 0;
+    }
+};
+
+struct __attribute__((packed)) TrivialResult {
+    int code = -1;
+    char description[TRIVIAL_RESULT_DESCRIPTION_SIZE] = {};
+    uint16_t description_len = 0;
+
+    TrivialResult(int code, const char *msg) {
+        this->code = code;
+
+        int len = strlen(msg);
+        if(len > sizeof(this->description) - 1) {
+            len = sizeof(this->description) - 1;
+        }
+
+        memcpy(this->description, msg, len);
+        this->description_len = len;
+    }
+
+    bool validate() const {
+        if(description_len > sizeof(description) - 1) {
+            return false;
+        }
+
+        return true;
+    }
+
+    Message kernel_message() const {
+        Message msg;
+        msg.tag = MessageType::TRIVIAL_RESULT;
+        msg.body = (const uint8_t *) this;
+        msg.body_len = sizeof(TrivialResult);
+        return msg;
     }
 };
