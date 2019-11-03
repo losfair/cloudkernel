@@ -1,3 +1,3 @@
 # cloudkernel
 
-Usermode hypervisor and kernel for modern workloads.
+Distributed usermode hypervisor for modern workloads.
