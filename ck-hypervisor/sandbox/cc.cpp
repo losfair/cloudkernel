@@ -24,7 +24,7 @@ int kSendMessage(const ck_pid_t *recipient, uint64_t session, uint32_t tag, cons
     int header_len = parts[0].iov_len + parts[1].iov_len + parts[2].iov_len;
     int ret = sendmsg(hypervisor_fd, &hdr, 0);
     if(ret < header_len) return -1;
-    return 0;
+    return ret - header_len;
 }
 
 int kRecvMessage(ck_pid_t *sender, uint64_t *session, uint32_t *tag, uint8_t *data, size_t n) {
@@ -47,7 +47,7 @@ int kRecvMessage(ck_pid_t *sender, uint64_t *session, uint32_t *tag, uint8_t *da
     int header_len = parts[0].iov_len + parts[1].iov_len + parts[2].iov_len;
     int ret = recvmsg(hypervisor_fd, &hdr, 0);
     if(ret < header_len) return -1;
-    return 0;
+    return ret - header_len;
 }
 
 void * uMapHeap(size_t n) {

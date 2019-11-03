@@ -19,27 +19,23 @@
 #include <pthread.h>
 
 static int send_ok(int socket) {
-    Message msg;
-    msg.tag = MessageType::OK;
-    return msg.send(socket);
+    TrivialResult result(0, "");
+    return result.kernel_message().send(socket);
+}
+
+static int send_ok(int socket, const char *description) {
+    TrivialResult result(0, description);
+    return result.kernel_message().send(socket);
 }
 
 static int send_reject(int socket) {
-    Message msg;
-    msg.tag = MessageType::REJECT;
-    return msg.send(socket);
-}
-
-static int send_reject(int socket, const char *reason, size_t reason_len) {
-    Message msg;
-    msg.tag = MessageType::REJECT;
-    msg.body = (const uint8_t *) reason;
-    msg.body_len = reason_len;
-    return msg.send(socket);
+    TrivialResult result(-1, "");
+    return result.kernel_message().send(socket);
 }
 
 static int send_reject(int socket, const char *reason) {
-    return send_reject(socket, reason, strlen(reason));
+    TrivialResult result(-1, reason);
+    return result.kernel_message().send(socket);
 }
 
 Process::Process(const std::vector<std::string>& new_args) {
@@ -97,6 +93,7 @@ void Process::run() {
         os_pid = new_pid;
 
         socket_listener = std::thread([this]() {
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
             serve_sandbox();
             global_process_set.notify_termination(this->ck_pid);
         });
@@ -192,7 +189,9 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             offer_msg.body = (const uint8_t *) &offer;
             offer_msg.body_len = sizeof(offer);
 
+            send_ok(socket);
             offer_msg.send(socket);
+
             break;
         }
         case MessageType::DEBUG_PRINT: {
@@ -217,12 +216,57 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             }
 
             std::promise<void> ch;
-            std::future<void> ch_fut;
+            std::future<void> ch_fut = ch.get_future();
             remote_proc->add_awaiter([&]() {
                 ch.set_value();
             });
+            {
+                auto _x = std::move(remote_proc); // drop
+            }
+            pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, nullptr);
             ch_fut.wait();
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
             send_ok(socket);
+            break;
+        }
+        case MessageType::POLL: {
+            pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, nullptr);
+            auto msg = pending_messages.pop();
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
+
+            auto out = msg.borrow();
+            out.send(socket);
+            break;
+        }
+        case MessageType::SERVICE_REGISTER: {
+            if(!privileged) {
+                send_reject(socket, "permission denied");
+                break;
+            }
+
+            if(rem > MAX_SERVICE_NAME_SIZE) {
+                send_reject(socket, "name too long");
+                break;
+            }
+
+            std::string name((const char *) data, rem);
+            bool registered = global_process_set.register_service(std::move(name), this->ck_pid);
+
+            if(registered) {
+                send_ok(socket);
+            } else {
+                send_reject(socket, "duplicate name");
+            }
+            break;
+        }
+        case MessageType::SERVICE_GET: {
+            std::string name((const char *) data, rem);
+            if(auto pid = global_process_set.get_service(name.c_str())) {
+                std::string pid_s = stringify_ck_pid(pid.value());
+                send_ok(socket, pid_s.c_str());
+            } else {
+                send_reject(socket, "service not found");
+            }
             break;
         }
         default: break; // invalid tag
@@ -233,7 +277,7 @@ void Process::serve_sandbox() {
     ck_pid_t recipient;
     uint64_t session;
     uint32_t raw_tag;
-    std::vector<uint8_t> m_buf(65536);
+    std::vector<uint8_t> m_buf(MAX_MESSAGE_BODY_SIZE);
 
     struct iovec parts[4];
     parts[0].iov_base = (void *) &recipient;
@@ -262,7 +306,17 @@ void Process::serve_sandbox() {
         if(recipient == 0) {
             handle_kernel_message(session, tag, &m_buf[0], size);
         } else {
-            send_reject(socket, "recipient not found");
+            auto remote_proc = global_process_set.get_process(recipient);
+            if(!remote_proc) send_reject(socket, "recipient not found");
+            else {
+                OwnedMessage owned;
+                owned.sender_or_recipient = this->ck_pid; // sender
+                owned.session = session;
+                owned.tag = tag;
+                owned.body = std::vector<uint8_t>(&m_buf[0], &m_buf[size]);
+                remote_proc->pending_messages.push(std::move(owned));
+                send_ok(socket);
+            }
         }
     }
 }
@@ -296,6 +350,22 @@ std::shared_ptr<Process> ProcessSet::get_process(ck_pid_t pid) {
     auto it = processes.find(pid);
     if(it != processes.end()) return it->second;
     else return std::shared_ptr<Process>();
+}
+
+bool ProcessSet::register_service(std::string&& name, ck_pid_t pid) {
+    std::lock_guard<std::mutex> lg(this->mu);
+    auto [it, inserted] = services.insert({std::move(name), pid});
+    return inserted;
+}
+
+std::optional<ck_pid_t> ProcessSet::get_service(const char *name) {
+    std::lock_guard<std::mutex> lg(this->mu);
+    auto it = services.find(name);
+    if(it != services.end()) {
+        return it->second;
+    } else {
+        return std::nullopt;
+    }
 }
 
 void ProcessSet::notify_termination(ck_pid_t pid) {

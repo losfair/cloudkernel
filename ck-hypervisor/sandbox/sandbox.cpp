@@ -118,7 +118,7 @@ struct SharedModule {
             ck_pid_t sender;
             uint64_t session;
             uint32_t raw_tag;
-            std::vector<uint8_t> m_buffer(65536);
+            std::vector<uint8_t> m_buffer(MAX_MESSAGE_BODY_SIZE);
             struct iovec parts[4];
 
             parts[0].iov_base = (void *) &sender;
@@ -151,7 +151,7 @@ struct SharedModule {
             uint8_t *cdata = CMSG_DATA(cmsg);
 
             MessageType tag = (MessageType) raw_tag;
-            if(tag == MessageType::REJECT) {
+            if(tag == MessageType::TRIVIAL_RESULT) {
                 throw std::runtime_error("module request rejected");
             } else if(tag == MessageType::MODULE_OFFER) {
                 int current = 0;
