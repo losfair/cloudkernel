@@ -1,59 +1,51 @@
 #![no_std]
-#![feature(core_intrinsics, alloc_error_handler)]
+#![feature(core_intrinsics)]
 
-#[macro_use]
 extern crate ck_crosscall;
 #[macro_use]
 extern crate sc;
-extern crate rlibc;
 #[macro_use]
 extern crate alloc;
 
 mod linux;
 
-use core::ptr::NonNull;
-use core::panic::PanicInfo;
-use alloc::string::String;
-use linux::Timespec;
-
-#[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+use alloc::vec::Vec;
+use ck_crosscall::poll::{poll_once, IncomingMessageMetadata};
 
 #[no_mangle]
-pub extern "C" fn _start() {
-    unsafe {
-        init_allocator();
-    }
+pub extern "C" fn ck_main() -> i32 {
     ck_crosscall::debug::log("Cloudkernel init process started.");
-    linux::nanosleep(&Timespec {
-        tv_sec: 1,
-        tv_nsec: 0,
-    });
-    ck_crosscall::debug::log("After nanosleep.");
-}
 
-unsafe fn init_allocator() {
-    wee_alloc::MMAP_IMPL = Some(do_alloc)
-}
+    if !ck_crosscall::service::register("init") {
+        panic!("Service registration failed.");
+    }
+    ck_crosscall::debug::log("Service registered.");
 
-fn do_alloc(bytes: usize) -> Option<NonNull<u8>> {
-    let ret = unsafe {
-        ck_crosscall::crosscall::cc_map_heap()(bytes)
-    };
-    if ret == -1isize as usize {
-        None
-    } else {
-        NonNull::new(ret as *mut u8)
+    start_unprivileged_service("ck-migration_0.0.0");
+
+    let mut poll_buf: Vec<u8> = vec![0; 65536];
+    loop {
+        let md = poll_once(&mut poll_buf);
+        ck_crosscall::debug::log(format!("Got new message from {:x}: {:?}", md.sender, md).as_str());
     }
 }
 
-#[panic_handler]
-pub extern fn panic_fmt(_info: &PanicInfo) -> ! {
-    loop {}
-}
+fn start_unprivileged_service(name: &str) {
+    ck_crosscall::debug::log(format!("Starting service in unprivileged mode: {}", name).as_str());
 
-#[alloc_error_handler]
-fn on_alloc_error(_: core::alloc::Layout) -> ! {
-    ck_crosscall::debug::log("Unable to allocate memory.");
-    loop {}
+    let result = ck_crosscall::process::ProcessCreationInfo::new(name, false).send();
+    match result {
+        Ok(x) => {
+            unsafe { ck_crosscall::debug::log(format!("Service started as process {:x}.", x.pid).as_str()) };
+            /*let result = ck_crosscall::process::wait_process(x.pid);
+            unsafe {
+                ck_crosscall::debug::log(format!("Process {:x} exited. Code: {} Description: {:?}", x.pid, result.code, result.get_description()).as_str());
+            }*/
+        }
+        Err(e) => {
+            unsafe {
+                ck_crosscall::debug::log(format!("Unable to create process. Error code: {} Description: {:?}", e.code, e.get_description()).as_str());
+            }
+        }
+    }
 }

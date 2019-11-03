@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Timespec {
