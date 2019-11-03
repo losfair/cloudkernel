@@ -1,4 +1,5 @@
 use core::ptr::NonNull;
+use core::mem::MaybeUninit;
 
 #[macro_export]
 macro_rules! define_crosscall_resolver {
@@ -28,14 +29,75 @@ define_crosscall_resolver!(cc_map_heap, "user_0.0.0/MapHeap", unsafe extern "C" 
 #[repr(u32)]
 pub enum MessageType {
     INVALID = 0,
+    TRIVIAL_RESULT,
     MODULE_REQUEST,
     MODULE_OFFER,
-    REJECT,
     PROCESS_CREATE,
     PROCESS_OFFER,
     DEBUG_PRINT,
-    OK,
     PROCESS_WAIT,
+    POLL,
+    SERVICE_REGISTER,
+    SERVICE_GET,
+}
+
+#[repr(packed)]
+#[derive(Copy, Clone)]
+pub struct TrivialResult {
+    pub code: i32,
+    pub description: [u8; crate::consts::TRIVIAL_RESULT_DESCRIPTION_SIZE],
+    pub description_len: u16,
+}
+
+impl TrivialResult {
+    pub fn get_description(&self) -> Option<&str> {
+        let len = if (self.description_len as usize) < self.description.len() {
+            self.description_len as usize
+        } else {
+            self.description.len()
+        };
+        match core::str::from_utf8(&self.description[..len]) {
+            Ok(x) => Some(x),
+            Err(_) => None
+        }
+    }
+}
+
+pub fn wait_for_trivial_result() -> TrivialResult {
+    _wait_for_trivial_result(false)
+}
+
+pub fn wait_for_trivial_result_abort_on_error() -> TrivialResult {
+    _wait_for_trivial_result(true)
+}
+
+fn _wait_for_trivial_result(abort: bool) -> TrivialResult {
+    unsafe {
+        let mut sender: u128 = 0;
+        let mut session: u64 = 0;
+        let mut tag: u32 = 0;
+        let mut result: MaybeUninit<TrivialResult> = MaybeUninit::uninit();
+
+        let ret = cc_recv_message()(&mut sender, &mut session, &mut tag, result.as_mut_ptr() as *mut u8, core::mem::size_of::<TrivialResult>());
+
+        if ret < 0 {
+            if abort {
+                core::intrinsics::abort();
+            } else {
+                panic!("wait_for_trivial_result: failed to receive message");
+            }
+        }
+
+        if tag == MessageType::TRIVIAL_RESULT as u32 && ret as usize == core::mem::size_of::<TrivialResult>() {
+            result.assume_init()
+        } else {
+            if abort {
+                core::intrinsics::abort();
+            } else {
+                panic!("wait_for_trivial_result: unexpected result from hypervisor");
+            }
+        }
+    }
 }
 
 pub enum CrosscallFunc {}
