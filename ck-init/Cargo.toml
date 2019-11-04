@@ -12,7 +12,10 @@ crate-type = ["staticlib"]
 [dependencies]
 ck-crosscall = { path = "../ck-crosscall" }
 sc = "0.2"
-num_enum = "0.4"
+
+[dependencies.num_enum]
+version = "0.4"
+default-features = false
 
 [dependencies.byteorder]
 version = "1.3"
