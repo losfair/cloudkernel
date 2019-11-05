@@ -2,6 +2,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/ptrace.h>
 #include <fcntl.h>
 #include <sstream>
 #include <string>
@@ -15,8 +16,11 @@
 #include <ck-hypervisor/linking.h>
 #include <ck-hypervisor/config.h>
 #include <ck-hypervisor/process_api.h>
+#include <ck-hypervisor/syscall.h>
 #include <regex>
 #include <pthread.h>
+#include <assert.h>
+#include <sys/mman.h>
 
 static int send_ok(int socket) {
     TrivialResult result(0, "");
@@ -38,6 +42,41 @@ static int send_reject(int socket, const char *reason) {
     return result.kernel_message().send(socket);
 }
 
+void Process::run_as_child(int socket) {
+    std::stringstream ss;
+    ss << "CK_HYPERVISOR_FD=" << socket;
+    auto socket_id_env_str = ss.str();
+
+    int flags = fcntl(socket, F_GETFD, 0);
+    flags &= ~FD_CLOEXEC;
+    if(fcntl(socket, F_SETFD, flags) < 0) {
+        std::cout << "unable to clear cloexec" << std::endl;
+        exit(1);
+    }
+
+    std::vector<char *> args_exec;
+    args_exec.push_back((char *) "ck-hypervisor-sandbox");
+    for(auto& arg : args) {
+        args_exec.push_back((char *) arg.c_str());
+    }
+    args_exec.push_back(nullptr);
+
+    std::vector<char *> envp_exec;
+    if(privileged) envp_exec.push_back((char *) "CK_PRIVILEGED=1");
+    else envp_exec.push_back((char *) "CK_PRIVILEGED=0");
+    envp_exec.push_back((char *) socket_id_env_str.c_str());
+    envp_exec.push_back(nullptr);
+
+    if(setgid(65534) != 0 || setuid(65534) != 0) {
+        std::cout << "unable to drop permissions" << std::endl;
+        if(getuid() == 0) {
+            std::cout << "cannot continue as root." << std::endl;
+            exit(1);
+        }
+    }
+    execve("./ck-hypervisor-sandbox", &args_exec[0], &envp_exec[0]);
+}
+
 Process::Process(const std::vector<std::string>& new_args) {
     args = new_args;
 }
@@ -49,61 +88,42 @@ void Process::run() {
         throw std::runtime_error("unable to create socket pair");
     }
 
-    int new_pid = fork();
-    if(new_pid < 0) throw std::runtime_error("unable to create process");
-
-    if(new_pid == 0) {
-        close(sockets[0]);
-        std::stringstream ss;
-        ss << "CK_HYPERVISOR_FD=" << sockets[1];
-        auto socket_id_env_str = ss.str();
-
-        int flags = fcntl(sockets[1], F_GETFD, 0);
-        flags &= ~FD_CLOEXEC;
-        if(fcntl(sockets[1], F_SETFD, flags) < 0) {
-            std::cout << "unable to clear cloexec" << std::endl;
-            exit(1);
+    std::promise<void> child_pid;
+    std::future<void> child_pid_fut = child_pid.get_future();
+    ptrace_monitor = std::thread([this, &child_pid, sockets]() {
+        int new_pid = fork();
+        if(new_pid < 0) throw std::runtime_error("unable to create process");
+        if(new_pid == 0) {
+            close(sockets[0]);
+            run_as_child(sockets[1]);
+            _exit(1);
         }
-
-        std::vector<char *> args_exec;
-        args_exec.push_back((char *) "ck-hypervisor-sandbox");
-        for(auto& arg : args) {
-            args_exec.push_back((char *) arg.c_str());
-        }
-        args_exec.push_back(nullptr);
-
-        std::vector<char *> envp_exec;
-        if(privileged) envp_exec.push_back((char *) "CK_PRIVILEGED=1");
-        else envp_exec.push_back((char *) "CK_PRIVILEGED=0");
-        envp_exec.push_back((char *) socket_id_env_str.c_str());
-        envp_exec.push_back(nullptr);
-
-        if(setgid(65534) != 0 || setuid(65534) != 0) {
-            std::cout << "unable to drop permissions" << std::endl;
-            if(getuid() == 0) {
-                std::cout << "cannot continue as root." << std::endl;
-                exit(1);
-            }
-        }
-        execve("./ck-hypervisor-sandbox", &args_exec[0], &envp_exec[0]);
-        exit(1);
-    } else {
-        close(sockets[1]);
-        socket = sockets[0];
         os_pid = new_pid;
+        child_pid.set_value();
 
-        socket_listener = std::thread([this]() {
-            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
-            serve_sandbox();
-            global_process_set.notify_termination(this->ck_pid);
-        });
-    }
+        try {
+            run_ptrace_monitor();
+        } catch(const std::runtime_error& e) {
+            std::cout << "ptrace monitor exited with error: " << e.what() << std::endl;
+        }
+        global_process_set.notify_termination(this->ck_pid);
+    });
+
+    child_pid_fut.wait();
+    close(sockets[1]);
+    socket = sockets[0];
+
+    socket_listener = std::thread([this]() {
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
+        serve_sandbox();
+        global_process_set.notify_termination(this->ck_pid);
+    });
 }
 
 Process::~Process() {
-    kill(os_pid, SIGKILL);
-    int wstatus;
-    waitpid(os_pid, &wstatus, 0);
+    kill_requested.store(true);
+    kill(os_pid, SIGTERM);
+    ptrace_monitor.join(); // ptrace_monitor will handle the waitpid() cleanup stuff.
 
     pthread_cancel(socket_listener.native_handle());
     socket_listener.join();
@@ -114,6 +134,205 @@ Process::~Process() {
         std::lock_guard<std::mutex> lg(awaiters_mu);
         for(auto& f : awaiters) f();
     }
+}
+
+void Process::run_ptrace_monitor() {
+    int wstatus;
+    assert(waitpid(os_pid, &wstatus, 0) >= 0);
+
+    if(WSTOPSIG(wstatus) != SIGSTOP) {
+        throw std::runtime_error("Expecting a SIGSTOP but got something else.");
+    }
+
+    if(ptrace(PTRACE_SETOPTIONS, os_pid, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD) < 0) {
+        throw std::runtime_error("Unable to call ptrace() on sandbox process.");
+    }
+
+    std::cout << "Monitor initialized on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+
+    int stopsig = 0;
+
+    while(true) {
+        ptrace(PTRACE_SYSCALL, os_pid, 0, stopsig);
+        assert(waitpid(os_pid, &wstatus, 0) >= 0);
+
+        // Normal exit or killed.
+        if(WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
+            break;
+        }
+
+        stopsig = WSTOPSIG(wstatus);
+
+        user_regs_struct regs = {};
+        ptrace(PTRACE_GETREGS, os_pid, 0, &regs);
+
+        TraceContinuationState tcs = TraceContinuationState::CLEANUP;
+        if(stopsig == (SIGTRAP | 0x80)) { // system call
+            tcs = handle_syscall(regs, stopsig);
+            if(tcs == TraceContinuationState::CONTINUE && stopsig != (SIGTRAP | 0x80)) {
+                tcs = handle_signal(regs, stopsig);
+            } else {
+                stopsig = 0;
+            }
+        } else {
+            tcs = handle_signal(regs, stopsig);
+        }
+
+        switch(tcs) {
+            case TraceContinuationState::CONTINUE:
+                break;
+            case TraceContinuationState::CLEANUP:
+                kill(os_pid, SIGKILL);
+                assert(waitpid(os_pid, &wstatus, 0) >= 0);
+                if(!WIFSIGNALED(wstatus)) {
+                    throw std::runtime_error("Got unexpected status after sending SIGKILL.");
+                }
+                goto out;
+            case TraceContinuationState::BREAK:
+                goto out;
+            default: assert(false);
+        }
+    }
+
+    out:
+
+    std::cout << "Monitor exited on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+}
+
+enum class SyscallFixupMethod {
+    SET_VALUE,
+    SEND_SIGSYS,
+};
+
+TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stopsig_out) {
+    bool is_invalid = false;
+    SyscallFixupMethod fixup_method = SyscallFixupMethod::SET_VALUE;
+    long replace_value = -EPERM;
+
+    long nr = regs.orig_rax;
+    switch(nr) {
+        // allowed
+        case __NR_sendmsg:
+        case __NR_recvmsg:
+        case __NR_rt_sigreturn:
+        case __NR_exit_group:
+        case __NR_lseek:
+            is_invalid = false;
+            break;
+        case __NR_mmap:
+            if(this->strict_mode.load() && !this->inspect_mmap(regs.rdi, regs.rsi, regs.rdx, regs.rcx, regs.r8, regs.r9)) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+            } else {
+                is_invalid = false;
+            }
+            break;
+        case __NR_munmap:
+            if(this->strict_mode.load() && !this->inspect_munmap(regs.rdi, regs.rsi)) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+            } else {
+                is_invalid = false;
+            }
+            break;
+        case __NR_read:
+        case __NR_write:
+        case __NR_sendto:
+        case __NR_recvfrom:
+        case __NR_fstat:
+        case __NR_rt_sigprocmask:
+        case __NR_brk:
+            if(this->strict_mode.load()) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+            } else {
+                is_invalid = false;
+            }
+            break;
+        case CK_SYS_ENTER_STRICT_MODE:
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            this->strict_mode.store(true);
+            std::cout << "Process " << os_pid << "/" << stringify_ck_pid(ck_pid) << " entered strict mode." << std::endl;
+            break;
+        case CK_SYS_ENTER_RECORD_MODE:
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            this->record_mode.store(true);
+            std::cout << "Process " << os_pid << "/" << stringify_ck_pid(ck_pid) << " entered record mode." << std::endl;
+            break;
+        default:
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+            break;
+    }
+
+    if(is_invalid) {
+        regs.orig_rax = __NR_getpid;
+        ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+    }
+
+    ptrace(PTRACE_SYSCALL, os_pid, 0, 0);
+    int wstatus = 0;
+    assert(waitpid(os_pid, &wstatus, 0) >= 0);
+
+    int stopsig = WSTOPSIG(wstatus);
+    if(WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
+        return TraceContinuationState::BREAK;
+    }
+
+    stopsig = WSTOPSIG(wstatus);
+    if(stopsig == (SIGTRAP | 0x80)) {
+        if(is_invalid) {
+            ptrace(PTRACE_GETREGS, os_pid, 0, &regs);
+            switch(fixup_method) {
+                case SyscallFixupMethod::SET_VALUE: {
+                    regs.rax = replace_value;
+                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+                    break;
+                }
+                case SyscallFixupMethod::SEND_SIGSYS: {
+                    regs.rax = nr;
+                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+                    kill(os_pid, SIGSYS);
+                    break;
+                }
+                default: assert(false);
+            }
+        }
+    } else {
+        stopsig_out = stopsig;
+    }
+
+    return TraceContinuationState::CONTINUE;
+}
+
+TraceContinuationState Process::handle_signal(user_regs_struct regs, int& sig) {
+    //std::cout << "Signal received: " << sig << std::endl;
+    if(sig == SIGTERM && kill_requested.load()) {
+        return TraceContinuationState::CLEANUP;
+    }
+    return TraceContinuationState::CONTINUE;
+}
+
+bool Process::inspect_mmap(unsigned long addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    auto ck_pid_s = stringify_ck_pid(this->ck_pid);
+
+    if(this->record_mode.load()) {
+        if(fd == -1) {
+            printf("[S-%s] Anonymous mmap: %p, +%lu\n", ck_pid_s.c_str(), (void *) addr, length);
+        } else {
+            printf("[S-%s] mmap %d (offset = %ld): %p, +%lu\n", ck_pid_s.c_str(), fd, offset, (void *) addr, length);
+        }
+    }
+    
+    return true;
+}
+
+bool Process::inspect_munmap(unsigned long addr, size_t length) {
+    return true;
 }
 
 void Process::add_awaiter(std::function<void()>&& awaiter) {
@@ -197,7 +416,6 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
         case MessageType::DEBUG_PRINT: {
             std::string message((const char *) data, rem);
             std::cout << "[" << stringify_ck_pid(this->ck_pid) << "] " << message << std::endl;
-            send_ok(socket);
             break;
         }
         case MessageType::PROCESS_WAIT: {
@@ -370,7 +588,7 @@ std::optional<ck_pid_t> ProcessSet::get_service(const char *name) {
 
 void ProcessSet::notify_termination(ck_pid_t pid) {
     std::lock_guard<std::mutex> lg(this->mu);
-    pending_termination.push_back(pid);
+    pending_termination.insert(pid);
 }
 
 void ProcessSet::tick() {

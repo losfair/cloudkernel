@@ -1,5 +1,6 @@
 #include <ck-hypervisor/metadata.h>
 #include <ck-hypervisor/message.h>
+#include <ck-hypervisor/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -18,13 +19,25 @@
 #include <string>
 #include <regex>
 #include <memory>
+#include <sys/ptrace.h>
+#include <optional>
+#include <assert.h>
 
 #include "cc.h"
 
 int hypervisor_fd = -1;
-unsigned long text_end = TEXT_BASE;
-unsigned long mmap_end = MMAP_BASE;
+unsigned long brk_end = 0;
+unsigned long text_end = CK_SANDBOX_TEXT_BASE;
+unsigned long mmap_end = CK_SANDBOX_MMAP_BASE;
 bool sandbox_privileged = false;
+
+void debug_print(const char *text) {
+    Message msg;
+    msg.tag = MessageType::DEBUG_PRINT;
+    msg.body = (const uint8_t *) text;
+    msg.body_len = strlen(text);
+    assert(msg.send(hypervisor_fd) >= 0);
+}
 
 struct MapInfo {
     std::string full_name;
@@ -179,7 +192,6 @@ struct SharedModule {
 static SharedModule init_mod;
 static std::map<std::string, std::shared_ptr<SharedModule>> module_cache;
 
-
 void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
     int syscall_id = (int) ucontext->uc_mcontext.gregs[REG_RAX];
 
@@ -216,47 +228,29 @@ void handle_sigsys(int signum, siginfo_t *siginfo, ucontext_t *ucontext) {
             }
             break;
         }
-        default:
-            //printf("Unknown syscall: %d\n", syscall_id);
+        case __NR_brk: {
+            unsigned long new_end = ucontext->uc_mcontext.gregs[REG_RDI];
+            unsigned long alloc_size = new_end - brk_end;
+            void *new_ptr = mmap((void *) brk_end, alloc_size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if(new_ptr == MAP_FAILED) {
+                retval = -ENOMEM;
+                break;
+            }
+            brk_end = new_end;
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Fixed up brk(). (%p)", new_ptr);
+            debug_print(buf);
             break;
+        }
+        default: {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Unknown syscall: %d", syscall_id);
+            debug_print(buf);
+            break;
+        }
     }
 
     ucontext->uc_mcontext.gregs[REG_RAX] = retval;
-}
-
-void enforce_security_policies() {
-    //prctl(PR_SET_NO_NEW_PRIVS, 1);
-    //prctl(PR_SET_DUMPABLE, 0);
-
-    scmp_filter_ctx ctx;
-
-    if(sandbox_privileged) {
-        std::cout << "Setting up privileged mode." << std::endl;
-        ctx = seccomp_init(SCMP_ACT_ALLOW);
-        seccomp_rule_add(ctx, SCMP_ACT_TRAP, 20000, 0);
-    } else {
-        ctx = seccomp_init(SCMP_ACT_TRAP);
-
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigreturn), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit_group), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendto), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvfrom), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendmsg), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvmsg), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(munmap), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mprotect), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(brk), 0);
-
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(read), 0);
-        seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write), 0);
-    }
-
-    if(seccomp_load(ctx) < 0) {
-        std::cout << "unable to initialize seccomp" << std::endl;
-        exit(1);
-    }
 }
 
 static unsigned long __attribute__((naked, noreturn)) enter_user_program(void *stack, int (*f)()) {
@@ -268,6 +262,22 @@ static unsigned long __attribute__((naked, noreturn)) enter_user_program(void *s
     );
 }
 
+static long __attribute__((naked)) enter_strict_mode() {
+    asm(
+        "movq $" _STR(CK_SYS_ENTER_STRICT_MODE) ", %rax\n"
+        "syscall\n"
+        "ret\n"
+    );
+}
+
+static long __attribute__((naked)) enter_record_mode() {
+    asm(
+        "movq $" _STR(CK_SYS_ENTER_RECORD_MODE) ", %rax\n"
+        "syscall\n"
+        "ret\n"
+    );
+}
+
 int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
     hypervisor_fd = new_hypervisor_fd;
     signal(SIGSYS, (void (*) (int)) handle_sigsys);
@@ -276,7 +286,13 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
         std::cout << "No args" << std::endl;
         return 1;
     }
-    
+
+    ptrace(PTRACE_TRACEME, 0, 0, 0);
+    raise(SIGSTOP);
+
+    brk_end = (unsigned long) sbrk(0);
+    enter_strict_mode();
+
     try {
         init_mod.fetch(argv[0]);
     } catch(std::runtime_error& e) {
@@ -284,8 +300,9 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
         return 1;
     }
 
-    std::cout << "image_size: " << init_mod.image_size << std::endl;
+    //std::cout << "image_size: " << init_mod.image_size << std::endl;
 
+    enter_record_mode();
     init_mod.setup_mapping((void *) text_end);
     text_end += init_mod.image_size + init_mod.bss_size;
 
@@ -293,15 +310,14 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
 
     typedef int (*StartFunc)();
     StartFunc start_fn = (StartFunc) start_addr;
-    std::cout << "start_address: " << (void *) start_fn << std::endl;
+    //std::cout << "start_address: " << (void *) start_fn << std::endl;
 
-    if(mmap((void *) (STACK_TOP - STACK_SIZE), STACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) == MAP_FAILED) {
+    if(mmap((void *) (CK_SANDBOX_STACK_TOP - CK_SANDBOX_STACK_SIZE), CK_SANDBOX_STACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) == MAP_FAILED) {
         std::cout << "Unable to allocate stack" << std::endl;
         return 1;
     }
 
-    enforce_security_policies();
-    enter_user_program((void *) STACK_TOP, start_fn);
+    enter_user_program((void *) CK_SANDBOX_STACK_TOP, start_fn);
 }
 
 int main(int argc, const char *argv[]) {

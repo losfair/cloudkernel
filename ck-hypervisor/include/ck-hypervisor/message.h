@@ -69,6 +69,8 @@ struct __attribute__((packed)) TrivialResult {
     char description[TRIVIAL_RESULT_DESCRIPTION_SIZE] = {};
     uint16_t description_len = 0;
 
+    TrivialResult() {}
+
     TrivialResult(int code, const char *msg) {
         this->code = code;
 

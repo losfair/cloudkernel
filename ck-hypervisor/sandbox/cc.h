@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include <ck-hypervisor/memory_layout.h>
 
 typedef __uint128_t ck_pid_t;
 
@@ -16,7 +17,5 @@ int kRecvMessage(ck_pid_t *sender, uint64_t *session, uint32_t *tag, uint8_t *da
 
 void * uMapHeap(size_t n);
 
-#define TEXT_BASE 0x60000000ull
-#define MMAP_BASE 0x3000000000ull
-#define STACK_TOP 0x8000000000ull
-#define STACK_SIZE 1048576 * 512 // Only virtual memory size; not actually allocated until used.
+#define _QUOTE(x) #x
+#define _STR(x) _QUOTE(x)
