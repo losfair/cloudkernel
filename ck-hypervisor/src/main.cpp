@@ -3,9 +3,11 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <ck-hypervisor/process.h>
 #include <ck-hypervisor/registry.h>
+#include <ck-hypervisor/network.h>
 
 int main(int argc, const char *argv[]) {
     if(argc == 1) {
@@ -16,6 +18,11 @@ int main(int argc, const char *argv[]) {
     if(const char *prefix = getenv("CK_MODULE_PREFIX")) {
         global_registry.set_prefix(prefix);
     }
+
+    global_router.setup_tun();
+    std::thread([]() {
+        global_router.run_loop();
+    }).detach();
 
     std::vector<std::string> args;
     for(int i = 1; i < argc; i++) {

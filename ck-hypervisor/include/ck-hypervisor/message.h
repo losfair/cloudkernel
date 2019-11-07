@@ -17,6 +17,9 @@ enum class MessageType {
     POLL,
     SERVICE_REGISTER,
     SERVICE_GET,
+    IP_PACKET,
+    IP_ADDRESS_REGISTER_V4,
+    IP_ADDRESS_REGISTER_V6,
 };
 
 class Message {

@@ -171,17 +171,17 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
         return 1;
     }
 
+    ptrace(PTRACE_TRACEME, 0, 0, 0);
+    raise(SIGSTOP);
+
+    report_hypervisor_fd(hypervisor_fd);
+
     try {
         init_mod.fetch(argv[0]);
     } catch(std::runtime_error& e) {
         std::cout << "Fetch error: " << e.what() << std::endl;
         return 1;
     }
-
-    ptrace(PTRACE_TRACEME, 0, 0, 0);
-    raise(SIGSTOP);
-
-    report_hypervisor_fd(hypervisor_fd);
 
     init_mod.run(argc, argv);
     std::cout << "run_as_elf returned" << std::endl;

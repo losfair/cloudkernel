@@ -24,6 +24,7 @@
 #include <sys/uio.h>
 #include <asm/prctl.h>
 #include <sys/prctl.h>
+#include <ck-hypervisor/network.h>
 
 static const bool permissive_mode = false;
 
@@ -312,7 +313,18 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
         {
             int orig_fd = regs.rdi;
             if(auto desc = io_map.get_file_description(orig_fd)) {
-                regs.rdi = desc->os_fd;
+                if(desc->ty == FileInstanceType::USER) {
+                    is_invalid = true;
+                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+                } else {
+                    regs.rdi = desc->os_fd;
+                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+                    deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
+                        regs.rdi = orig_fd;
+                        ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+                        return false;
+                    });
+                }
             } else {
                 is_invalid = true;
                 fixup_method = SyscallFixupMethod::SET_VALUE;
@@ -324,18 +336,29 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
         {
             int orig_fd = regs.rdi;
             if(auto desc = io_map.get_file_description(orig_fd)) {
-                regs.rdi = desc->os_fd;
+                if(desc->ty == FileInstanceType::USER) {
+                    is_invalid = true;
+                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+
+                    // `deferred` won't be executed if is_invalid == true.
+                    io_map.remove_file_description(orig_fd);
+                } else {
+                    regs.rdi = desc->os_fd;
+                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+                    deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
+                        if(regs.rax == 0) {
+                            io_map.remove_file_description(orig_fd);
+                        }
+                        regs.rdi = orig_fd;
+                        ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+                        return false;
+                    });
+                }
             } else {
                 is_invalid = true;
                 fixup_method = SyscallFixupMethod::SET_VALUE;
                 replace_value = -EBADF;
             }
-            deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
-                if(regs.rax == 0) {
-                    io_map.remove_file_description(orig_fd);
-                }
-                return false;
-            });
             break;
         }
 
@@ -356,6 +379,9 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
 
         // system information
         case __NR_uname:
+
+        // sync
+        case __NR_futex:
             break;
 
         case __NR_readlink:
@@ -421,6 +447,15 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
             replace_value = 0;
+            break;
+        }
+        case CK_SYS_CREATE_USER_FD: {
+            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
+            desc->ty = FileInstanceType::USER;
+            int vfd = io_map.insert_file_description(std::move(desc));
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = vfd;
             break;
         }
         default:
@@ -647,6 +682,40 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             } else {
                 send_reject(socket, "service not found");
             }
+            break;
+        }
+        case MessageType::IP_PACKET: {
+            if(rem == 0 || rem > 1500) break;
+            global_router.dispatch_packet(data, rem);
+            break;
+        }
+        case MessageType::IP_ADDRESS_REGISTER_V4: {
+            if(rem != 4) {
+                send_reject(socket, "invalid address length");
+                break;
+            }
+
+            uint32_t addr = * (uint32_t *) data;
+            std::reverse((uint8_t *) &addr, ((uint8_t *) &addr) + 4);
+            __uint128_t full_addr = ((__uint128_t) 0xffff00000000ull) | (__uint128_t) addr;
+
+            auto endpoint = std::shared_ptr<RoutingEndpoint>(new RoutingEndpoint);
+
+            // This function can be recursively called within another `handle_kernel_message`.
+            // Make sure locks are held properly.
+            endpoint->on_packet = [full_addr, ck_pid(this->ck_pid)](uint8_t *data, size_t len) {
+                if(auto proc = global_process_set.get_process(ck_pid)) {
+                    OwnedMessage msg;
+                    msg.tag = MessageType::IP_PACKET;
+                    msg.body = std::vector<uint8_t>(data, data + len);
+                    proc->pending_messages.push(std::move(msg));
+                } else {
+                    global_router.unregister_route(full_addr, ck_pid);
+                }
+            };
+            global_router.register_route(full_addr, std::move(endpoint));
+
+            send_ok(socket);
             break;
         }
         default: break; // invalid tag
