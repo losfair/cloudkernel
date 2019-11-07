@@ -12,8 +12,7 @@
 class ModuleHandle {
     public:
     int module_fd = -1;
-    size_t file_size = 0, metadata_size = 0;
-    ModuleMetadata metadata;
+    size_t file_size = 0;
 
     ModuleHandle(int new_fd);
     ModuleHandle(const ModuleHandle& that) = delete;
@@ -22,10 +21,6 @@ class ModuleHandle {
 
     inline size_t get_file_size() {
         return file_size;
-    }
-
-    inline size_t get_metadata_size() {
-        return metadata_size;
     }
 
     inline ssize_t read(uint8_t *out, size_t count) {

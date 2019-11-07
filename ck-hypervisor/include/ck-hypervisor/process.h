@@ -19,6 +19,7 @@
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/bqueue.h>
 #include <ck-hypervisor/owned_message.h>
+#include <ck-hypervisor/iomap.h>
 
 using ck_pid_t = __uint128_t;
 
@@ -27,6 +28,14 @@ enum class TraceContinuationState {
     CLEANUP,
     BREAK,
 };
+
+enum class SandboxState {
+    NONE,
+    IN_EXEC,
+    IN_SANDBOX,
+};
+
+using DeferredSyscallHandler = std::function<bool(user_regs_struct&)>;
 
 class Process {
     private:
@@ -38,8 +47,9 @@ class Process {
     std::mutex awaiters_mu;
     BQueue<OwnedMessage> pending_messages;
     std::atomic<bool> kill_requested = std::atomic<bool>(false);
-    std::atomic<bool> strict_mode = std::atomic<bool>(false);
-    std::atomic<bool> record_mode = std::atomic<bool>(false);
+    std::atomic<SandboxState> sandbox_state = std::atomic<SandboxState>(SandboxState::NONE);
+    IOMap io_map;
+    std::atomic<bool> notify_invalid_syscall = std::atomic<bool>(false);
 
     void serve_sandbox();
     void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem);
@@ -47,8 +57,20 @@ class Process {
     TraceContinuationState handle_syscall(user_regs_struct regs, int& sig);
     TraceContinuationState handle_signal(user_regs_struct regs, int& sig);
     void run_as_child(int socket);
-    bool inspect_mmap(unsigned long addr, size_t length, int prot, int flags, int fd, off_t offset);
-    bool inspect_munmap(unsigned long addr, size_t length);
+    bool read_memory(unsigned long remote_addr, size_t len, uint8_t *data);
+    template<class T> std::optional<T> read_memory_typed(unsigned long remote_addr) {
+        static_assert(std::is_trivial<T>::value, "read_memory_typed only accepts trivial types");
+        T ret;
+        if(read_memory(remote_addr, sizeof(T), (uint8_t *) &ret)) return ret;
+        else return std::nullopt;
+    }
+    bool write_memory(unsigned long remote_addr, size_t len, const uint8_t *data);
+    template<class T> bool write_memory_typed(unsigned long remote_addr, const T& data) {
+        static_assert(std::is_trivial<T>::value, "write_memory_typed only accepts trivial types");
+        return write_memory(remote_addr, sizeof(T), (const uint8_t *) &data);
+    }
+    std::optional<std::string> read_c_string(unsigned long remote_addr, size_t max_size);
+    bool register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path);
 
     public:
     std::vector<std::string> args;

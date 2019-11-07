@@ -7,9 +7,6 @@
 typedef __uint128_t ck_pid_t;
 
 extern int hypervisor_fd;
-extern unsigned long text_end;
-extern unsigned long mmap_end;
-extern bool sandbox_privileged;
 
 int kDebugLog(const char *data, size_t n);
 int kSendMessage(const ck_pid_t *recipient, uint64_t session, uint32_t tag, const uint8_t *data, size_t n);

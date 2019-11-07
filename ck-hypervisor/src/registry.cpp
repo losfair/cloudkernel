@@ -23,15 +23,6 @@ ModuleHandle::ModuleHandle(int new_fd) {
     lseek(module_fd, 0, SEEK_END);
     file_size = lseek(module_fd, 0, SEEK_CUR);
     lseek(module_fd, 0, SEEK_SET);
-
-    metadata.parse([&](uint8_t *out, size_t n) -> int {
-        return ::read(module_fd, (void *) out, n);
-    });
-
-    metadata_size = lseek(module_fd, 0, SEEK_CUR);
-    lseek(module_fd, 0, SEEK_SET);
-    metadata.serialized = std::vector<uint8_t>(metadata_size);
-    if(::read(module_fd, (void *) &metadata.serialized[0], metadata_size) != metadata_size) throw std::runtime_error("unable to read full metadata");
 }
 
 ModuleHandle::~ModuleHandle() {
@@ -47,16 +38,13 @@ std::unique_ptr<ModuleHandle> Registry::get_module(const char *name, VersionCode
     std::lock_guard<std::mutex> lg(this->mu);
 
     std::stringstream filename_builder;
-    filename_builder << prefix << name << "_" << version.major << "." << version.minor << "." << version.patch << ".ckm";
+    filename_builder << prefix << name << "_" << version.major << "." << version.minor << "." << version.patch << ".elf";
     std::string filename = filename_builder.str();
 
     int fd = open(filename.c_str(), O_RDONLY | O_CLOEXEC);
     if(fd < 0) throw std::runtime_error("unable to open file for module");
 
     std::unique_ptr<ModuleHandle> handle(new ModuleHandle(fd));
-    handle->metadata.name = name;
-    handle->metadata.version = version;
-
     return handle;
 }
 

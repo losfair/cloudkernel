@@ -15,7 +15,7 @@
 
 DynamicModule::DynamicModule(const char *name, VersionCode version) {
     auto handle = global_registry.get_module(name, version);
-    size_t body_size = handle->get_file_size() - handle->get_metadata_size();
+    size_t body_size = handle->get_file_size();
     module_size = round_up(body_size, getpagesize());
 
     mfd = memfd_create("dynamic-module", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -38,7 +38,6 @@ DynamicModule::DynamicModule(const char *name, VersionCode version) {
     }
 
     munmap(mapped, module_size);
-    metadata = handle->metadata;
 
     if(fcntl(mfd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_WRITE | F_SEAL_SEAL) < 0) {
         close(mfd);

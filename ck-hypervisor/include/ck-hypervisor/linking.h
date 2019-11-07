@@ -12,7 +12,6 @@ class DynamicModule {
     public:
     int mfd = -1;
     size_t module_size = 0;
-    ModuleMetadata metadata;
 
     DynamicModule(const char *name, VersionCode version);
     DynamicModule(const DynamicModule& that) = delete;

@@ -18,4 +18,4 @@ target_link_libraries(ck-hypervisor pthread)
 
 add_executable(ck-hypervisor-sandbox ${SANDBOX_SOURCES})
 target_link_libraries(ck-hypervisor-sandbox seccomp)
-set_target_properties(ck-hypervisor-sandbox PROPERTIES LINK_FLAGS "-static")
+set_target_properties(ck-hypervisor-sandbox PROPERTIES LINK_FLAGS "-static -Wl,-T ../sandbox.ld")
