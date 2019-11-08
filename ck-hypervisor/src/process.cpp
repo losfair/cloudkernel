@@ -30,7 +30,6 @@
 #include <sys/prctl.h>
 #include <ck-hypervisor/network.h>
 #include <sys/personality.h>
-#include <sys/capability.h>
 
 static const bool permissive_mode = false;
 
@@ -81,34 +80,20 @@ void Process::run_as_child(int socket) {
     envp_exec.push_back((char *) socket_id_env_str.c_str());
     envp_exec.push_back(nullptr);
 
-    cap_t caps = cap_get_proc();
-    if(!caps) {
-        std::cout << "cap_get_proc() failed" << std::endl;
-        exit(1);
-    }
-    cap_value_t target_cap = CAP_SYS_RESOURCE;
-    if (
-        cap_set_flag(caps, CAP_EFFECTIVE, 1, &target_cap, CAP_SET) == -1
-        || cap_set_proc(caps) == -1
-        || cap_free(caps) == -1
-    ) {
-        std::cout << "unable to set capabilities" << std::endl;
-        exit(1);
-    }
-
-    /*if(setgid(65534) != 0 || setuid(65534) != 0) {
+    if(setgid(65534) != 0 || setuid(65534) != 0) {
         std::cout << "unable to drop permissions" << std::endl;
         if(getuid() == 0) {
             std::cout << "cannot continue as root." << std::endl;
             exit(1);
         }
-    }*/
+    }
     execve("./ck-hypervisor-sandbox", &args_exec[0], &envp_exec[0]);
 }
 
 Process::Process(const std::vector<std::string>& new_args) {
     args = new_args;
     io_map.setup_defaults();
+    pending_messages.set_capacity(1024);
 }
 
 static bool read_process_memory(int os_pid, unsigned long remote_addr, size_t len, uint8_t *data) {
@@ -218,7 +203,6 @@ void Process::run() {
     socket = sockets[0];
 
     socket_listener = std::thread([this]() {
-        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
         serve_sandbox();
         global_process_set.notify_termination(this->ck_pid);
     });
@@ -227,9 +211,10 @@ void Process::run() {
 Process::~Process() {
     kill_requested.store(true);
     kill(os_pid, SIGTERM);
-    ptrace_monitor.join(); // ptrace_monitor will handle the waitpid() cleanup stuff.
 
-    pthread_cancel(socket_listener.native_handle());
+    pending_messages.close();
+
+    ptrace_monitor.join(); // ptrace_monitor will handle the waitpid() cleanup stuff.
     socket_listener.join();
 
     close(socket);
@@ -428,6 +413,7 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
         case __NR_mmap:
         case __NR_munmap:
         case __NR_mprotect:
+        case __NR_madvise:
 
         // signal handling
         case __NR_rt_sigprocmask:
@@ -954,19 +940,16 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             {
                 auto _x = std::move(remote_proc); // drop
             }
-            pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, nullptr);
             ch_fut.wait();
-            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
             send_ok(socket);
             break;
         }
         case MessageType::POLL: {
-            pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, nullptr);
-            auto msg = pending_messages.pop();
-            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
-
-            auto out = msg.borrow();
-            out.send(socket);
+            if(auto maybe_msg = pending_messages.pop()) {
+                auto msg = std::move(maybe_msg.value());
+                auto out = msg.borrow();
+                out.send(socket);
+            }
             break;
         }
         case MessageType::SERVICE_REGISTER: {
@@ -1139,13 +1122,22 @@ void ProcessSet::notify_termination(ck_pid_t pid) {
 }
 
 void ProcessSet::tick() {
-    std::lock_guard<std::mutex> lg(this->mu);
+    // Destructor calls are deferred to after releasing `this->mu` to prevent deadlocking.
+    std::vector<std::shared_ptr<Process>> deleted;
 
-    for(auto pid : pending_termination) {
-        auto it = processes.find(pid);
-        if(it != processes.end()) processes.erase(it);
+    {
+        std::lock_guard<std::mutex> lg(this->mu);
+
+        for(auto pid : pending_termination) {
+            auto it = processes.find(pid);
+            if(it != processes.end()) {
+                deleted.push_back(it->second);
+                processes.erase(it);
+            }
+        }
+
+        pending_termination.clear();
     }
-    pending_termination.clear();
 }
 
 ProcessSet global_process_set;
