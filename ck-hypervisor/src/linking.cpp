@@ -12,6 +12,7 @@
 #include <mutex>
 #include <iostream>
 #include <string.h>
+#include <stdio.h>
 
 DynamicModule::DynamicModule(const char *name, VersionCode version) {
     auto handle = global_registry.get_module(name, version);
@@ -52,12 +53,24 @@ void DynamicModule::init(std::function<void(uint8_t *)> feed, size_t len) {
         throw e;
     }
 
-    munmap(mapped, module_size);
-
-    if(fcntl(mfd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_WRITE | F_SEAL_SEAL) < 0) {
-        close(mfd);
-        throw std::runtime_error("unable to add seals");
+    if(munmap(mapped, module_size) < 0) {
+        printf("DynamicModule::init() failed to unmap: %s\n", strerror(errno));
+        throw std::runtime_error("unable to unmap");
     }
+
+    // FIXME: Sometimes fcntl returns EBUSY and retrying after a delay fixes that. Why?
+    for(int i = 0; i < 5; i++) {
+        if(fcntl(mfd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_WRITE | F_SEAL_SEAL) < 0) {
+            printf("DynamicModule::init() failed to add seals, retrying (%d)\n", i);
+            usleep(10000);
+            continue;
+        }
+        goto seal_ok;
+    }
+    close(mfd);
+    throw std::runtime_error("unable to add seals");
+
+    seal_ok:;
 }
 
 DynamicModule::~DynamicModule() {

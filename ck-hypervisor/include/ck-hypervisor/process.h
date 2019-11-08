@@ -76,7 +76,7 @@ class Process {
     }
     std::optional<std::string> read_c_string(unsigned long remote_addr, size_t max_size);
     bool register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path);
-    std::shared_ptr<ProcessSnapshot> take_snapshot();
+    std::shared_ptr<std::vector<uint8_t>> take_snapshot();
 
     public:
     std::vector<std::string> args;

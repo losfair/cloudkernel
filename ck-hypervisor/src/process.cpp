@@ -237,7 +237,7 @@ void Process::run_ptrace_monitor() {
         throw std::runtime_error("Unable to call ptrace() on sandbox process.");
     }
 
-    std::cout << "Monitor initialized on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+    //std::cout << "Monitor initialized on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
 
     int stopsig = 0;
 
@@ -283,9 +283,9 @@ void Process::run_ptrace_monitor() {
         }
     }
 
-    out:
+    out:;
 
-    std::cout << "Monitor exited on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+    //std::cout << "Monitor exited on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
 }
 
 enum class SyscallFixupMethod {
@@ -318,21 +318,21 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
 
     if(sandbox_state.load() == SandboxState::NONE) switch(nr) {
         case __NR_execve: {
-            std::cout << "Entering sandbox via execve: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+            //std::cout << "Entering sandbox via execve: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
             sandbox_state.store(SandboxState::IN_EXEC);
             break;
         }
         case CK_SYS_SET_REMOTE_HYPERVISOR_FD: {
             int remote_fd = regs.rdi;
             int vfd = io_map.insert_file_description(FileDescription::with_hypervisor_fd(remote_fd));
-            std::cout << "Remote hypervisor fd: " << remote_fd << "->" << vfd << std::endl;
+            //std::cout << "Remote hypervisor fd: " << remote_fd << "->" << vfd << std::endl;
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
             replace_value = 0;
             break;
         }
         case CK_SYS_ENTER_SANDBOX_NO_FDMAP: {
-            std::cout << "Entering sandbox: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+            //std::cout << "Entering sandbox: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
             sandbox_state.store(SandboxState::IN_SANDBOX_NO_FDMAP);
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
@@ -437,6 +437,9 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
         case __NR_set_tid_address:
         case __NR_exit_group:
         case __NR_exit:
+
+        // random
+        case __NR_getrandom:
             break;
 
         case __NR_readlink:
@@ -598,10 +601,9 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
                 break;
             }
 
-            auto serialized = std::shared_ptr<std::vector<uint8_t>>(new std::vector<uint8_t>(snapshot->serialize()));
             {
                 std::lock_guard<std::mutex> lg(last_snapshot_mu);
-                last_snapshot = std::move(serialized);
+                last_snapshot = std::move(snapshot);
             }
             replace_value = 1;
             break;
@@ -748,7 +750,6 @@ static std::optional<std::vector<MemoryRangeSnapshot>> take_memory_snapshot(int 
 
             MemoryRangeSnapshot mss;
             mss.start = start;
-            mss.data = std::vector<uint8_t>(end - start);
             if(perms.size() != 4) {
                 printf("take_memory_snapshot: unexpected 'perms' length\n");
                 return std::nullopt;
@@ -769,10 +770,14 @@ static std::optional<std::vector<MemoryRangeSnapshot>> take_memory_snapshot(int 
                 mss.ty = MemoryRangeType::DATA;
             }
 
-            if(!read_process_memory(os_pid, mss.start, mss.data.size(), &mss.data[0])) {
-                printf("take_memory_snapshot: unable to read process memory from %lx to %lx\n", start, end);
-                continue;
-            }
+            mss.data_feed = [os_pid, start, end](uint8_t *out) {
+                if(!read_process_memory(os_pid, start, end - start, out)) {
+                    printf("take_memory_snapshot: unable to read process memory from %lx to %lx\n", start, end);
+                    throw std::runtime_error("take_memory_snapshot: unable to read process memory");
+                }
+            };
+            mss.data_len = end - start;
+
             result.push_back(std::move(mss));
         }
     }
@@ -780,29 +785,25 @@ static std::optional<std::vector<MemoryRangeSnapshot>> take_memory_snapshot(int 
     return result;
 }
 
-std::shared_ptr<ProcessSnapshot> Process::take_snapshot() {
-    auto snapshot = std::shared_ptr<ProcessSnapshot>(new ProcessSnapshot);
+std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
+    ProcessSnapshot snapshot;
 
-    snapshot->notify_invalid_syscall = this->notify_invalid_syscall.load();
-    ptrace(PTRACE_GETREGS, os_pid, 0, &snapshot->regs);
+    snapshot.notify_invalid_syscall = this->notify_invalid_syscall.load();
+    ptrace(PTRACE_GETREGS, os_pid, 0, &snapshot.regs);
 
     if(auto ss = take_memory_snapshot(os_pid)) {
-        snapshot->memory = std::move(ss.value());
+        snapshot.memory = std::move(ss.value());
     } else {
-        return std::shared_ptr<ProcessSnapshot>();
+        return {};
     }
 
-    snapshot->files = io_map.snapshot_files();
+    snapshot.files = io_map.snapshot_files();
 
-    for(auto& s : snapshot->memory) {
-        printf("(memory) %lx %lu %d\n", s.start, s.data.size(), s.prot);
+    try {
+        return std::shared_ptr<std::vector<uint8_t>>(new std::vector<uint8_t>(snapshot.serialize()));
+    } catch(std::runtime_error& e) {
+        return {};
     }
-    for(auto& f : snapshot->files) {
-        printf("(file) vfd=%d ty=%d\n", f.vfd, f.ty);
-    }
-    
-    auto serialized = snapshot->serialize();
-    return snapshot;
 }
 
 void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem) {
@@ -865,13 +866,25 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
                 break;
             }
 
+            // We cannot pass the memfd back directly because we want syscalls like `lseek`
+            // to be independent.
+            std::stringstream fd_handle_path_ss;
+            fd_handle_path_ss << "/proc/" << getpid() << "/fd/" << dm->mfd;
+            std::string fd_handle_path = fd_handle_path_ss.str();
+            int fd_handle = open(fd_handle_path.c_str(), O_RDONLY);
+            if(fd_handle < 0) {
+                send_reject(socket, "cannot open mfd");
+                break;
+            }
+
             Message msg;
             msg.tag = MessageType::MODULE_OFFER;
             msg.body = (const uint8_t *) &module_type[0];
             msg.body_len = module_type.size();
-            msg.fd = dm->mfd;
+            msg.fd = fd_handle;
 
             msg.send(socket);
+            close(fd_handle);
             break;
         }
         case MessageType::PROCESS_CREATE: {

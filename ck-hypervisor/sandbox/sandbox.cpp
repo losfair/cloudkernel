@@ -85,13 +85,14 @@ static long __attribute__((naked, noreturn)) load_processor_state_and_unmap_load
 }
 
 struct SnapshotInvocationContext {
+    int mfd;
     void *image_mapping;
     size_t image_size;
 };
 
 void invoke_snapshot(SnapshotInvocationContext *ctx) {
     user_regs_struct regs;
-    load_snapshot((const uint8_t *) ctx->image_mapping, ctx->image_size, regs); // `ctx` becomes invalid after this
+    load_snapshot(ctx->mfd, (const uint8_t *) ctx->image_mapping, ctx->image_size, regs); // `ctx` becomes invalid after this
     enable_fdmap();
     load_processor_state_and_unmap_loader(&regs);
 }
@@ -139,6 +140,7 @@ struct SharedModule {
         } else if(module_type == "snapshot") {
             enter_sandbox_no_fdmap();
             SnapshotInvocationContext ctx = {
+                .mfd = mfd,
                 .image_mapping = image_mapping,
                 .image_size = image_size,
             };
@@ -206,8 +208,11 @@ struct SharedModule {
                 if(image_size < 0) this->image_size = 0;
                 else this->image_size = image_size;
 
-                image_mapping = mmap((void *) CK_LOADER_MMAP_BASE, this->image_size, PROT_READ, MAP_PRIVATE, mfd, 0);
+                if(this->image_size == 0) throw std::runtime_error("!!! image_size is zero");
+
+                image_mapping = mmap((void *) CK_LOADER_MMAP_BASE, this->image_size, PROT_READ, MAP_PRIVATE | MAP_FIXED, mfd, 0);
                 if(image_mapping == MAP_FAILED) {
+                    printf("MAP_FAILED: %s\n", strerror(errno));
                     throw std::runtime_error("failed to map image into memory");
                 }
             } else {

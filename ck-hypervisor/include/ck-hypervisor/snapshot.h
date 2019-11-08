@@ -4,13 +4,15 @@
 #include <stdint.h>
 #include <string>
 #include <sys/user.h>
+#include <functional>
 #include "file_base.h"
 #include "snapshot_base.h"
 
 class MemoryRangeSnapshot {
     public:
     uint64_t start = 0;
-    std::vector<uint8_t> data;
+    std::function<void(uint8_t *)> data_feed;
+    size_t data_len = 0;
     int prot = 0;
     MemoryRangeType ty = MemoryRangeType::INVALID;
 };

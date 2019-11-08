@@ -30,86 +30,44 @@ static long __attribute__((naked)) enable_notify_invalid_syscall() {
     );
 }
 
-void load_snapshot(const uint8_t *snapshot, size_t len, user_regs_struct& regs_out) {
+void __attribute__((noinline)) load_snapshot(int mfd, const uint8_t *snapshot, size_t len, user_regs_struct& regs_out) {
     size_t pos = 0;
 
     bool notify_invalid_syscall = read_vec<uint8_t>(snapshot, len, pos);
     regs_out = read_vec<user_regs_struct>(snapshot, len, pos);
 
     uint32_t n_memory_ranges = read_vec<uint32_t>(snapshot, len, pos); 
-    uint64_t last_start = 0, last_end = 0;
     for(uint32_t i = 0; i < n_memory_ranges; i++) {
         auto start_addr = read_vec<uint64_t>(snapshot, len, pos);
         auto data_len = read_vec<uint32_t>(snapshot, len, pos);
         auto prot = read_vec<int32_t>(snapshot, len, pos);
         auto ty = (MemoryRangeType) read_vec<uint32_t>(snapshot, len, pos);
+        auto data_offset = read_vec<uint64_t>(snapshot, len, pos);
         //printf("%lx %u %d %u\n", start_addr, data_len, prot, ty);
 
         switch(ty) {
             case MemoryRangeType::HEAP:
             case MemoryRangeType::DATA: {
-                void *ptr = mmap((void *) start_addr, data_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+                void *ptr = mmap((void *) start_addr, data_len, prot, MAP_PRIVATE | MAP_FIXED, mfd, data_offset);
                 if(ptr == MAP_FAILED) {
                     printf("load_snapshot: unable to map memory at %p\n", (void *) start_addr);
                     throw std::runtime_error("load_snapshot: unable to map memory");
                 }
 
-                read_vec_n(snapshot, len, pos, (uint8_t *) start_addr, data_len);
-
-                if(mprotect(ptr, data_len, prot) != 0) {
-                    printf("load_snapshot: unable to change protection at %p\n", (void *) start_addr);
-                    throw std::runtime_error("load_snapshot: unable to change protection");
-                }
-
                 break;
-            }/*
-            case MemoryRangeType::HEAP: {
-                printf("1\n");
-                if(start_addr != last_end) {
-                    throw std::runtime_error("load_snapshot: heap must start from the end address of data section");
-                }
-                printf("2\n");
-                if(prctl(PR_SET_MM, PR_SET_MM_START_DATA, last_start, 0, 0) != 0) {
-                    printf("%s\n", strerror(errno));
-                    throw std::runtime_error("load_snapshot: PR_SET_MM_START_DATA failed");
-                }
-                printf("3\n");
-                if(prctl(PR_SET_MM, PR_SET_MM_END_DATA, last_end, 0, 0) != 0) {
-                    throw std::runtime_error("load_snapshot: PR_SET_MM_END_DATA failed");
-                }
-                printf("4\n");
-                if(mmap((void *) start_addr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0) == MAP_FAILED) {
-                    printf("mmap on first heap page failed\n");
-                    throw std::runtime_error("xxx");
-                }
-                if(prctl(PR_SET_MM, PR_SET_MM_START_BRK, start_addr + 4096, 0, 0) != 0) {
-                    printf("%s\n", strerror(errno));
-                    throw std::runtime_error("load_snapshot: PR_SET_MM_START_BRK failed");
-                }
-                printf("5\n");
-                if(prctl(PR_SET_MM, PR_SET_MM_BRK, start_addr + (uint64_t) data_len, 0, 0) != 0) {
-                    printf("%s\n", strerror(errno));
-                    throw std::runtime_error("load_snapshot: PR_SET_MM_BRK failed");
-                }
-                printf("reading heap\n");
-                read_vec_n(snapshot, len, pos, (uint8_t *) start_addr, data_len);
-                printf("finished reading heap\n");
-                break;
-            }*/
+            }
+            //case MemoryRangeType::HEAP: break; // not supported
             case MemoryRangeType::STACK: {
                 unsigned long stack_end = start_addr + (uint64_t) data_len;
                 // touch stack
                 for(uint64_t *p = ((uint64_t *) stack_end) - 1; p >= (uint64_t *) start_addr; p--) {
                     *p = 0;
-                } 
-                read_vec_n(snapshot, len, pos, (uint8_t *) start_addr, data_len);
+                }
+                std::copy(snapshot + data_offset, snapshot + data_offset + data_len, (uint8_t *) start_addr);
                 break;
             }
             default: throw std::runtime_error("unknown memory range type");
         }
-
-        last_start = start_addr;
-        last_end = start_addr + (uint64_t) data_len;
     }
 
     uint32_t n_files = read_vec<uint32_t>(snapshot, len, pos); 
