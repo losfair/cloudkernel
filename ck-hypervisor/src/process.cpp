@@ -11,6 +11,10 @@
 #include <future>
 #include <signal.h>
 #include <string.h>
+#include <iostream>
+#include <fstream>
+#include <stdio.h>
+#include <stdlib.h>
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/registry.h>
 #include <ck-hypervisor/linking.h>
@@ -25,6 +29,8 @@
 #include <asm/prctl.h>
 #include <sys/prctl.h>
 #include <ck-hypervisor/network.h>
+#include <sys/personality.h>
+#include <sys/capability.h>
 
 static const bool permissive_mode = false;
 
@@ -49,6 +55,8 @@ static int send_reject(int socket, const char *reason) {
 }
 
 void Process::run_as_child(int socket) {
+    personality(ADDR_NO_RANDOMIZE); // snapshoting requires deterministic address space layout
+
     std::stringstream ss;
     ss << "CK_HYPERVISOR_FD=" << socket;
     auto socket_id_env_str = ss.str();
@@ -73,13 +81,28 @@ void Process::run_as_child(int socket) {
     envp_exec.push_back((char *) socket_id_env_str.c_str());
     envp_exec.push_back(nullptr);
 
-    if(setgid(65534) != 0 || setuid(65534) != 0) {
+    cap_t caps = cap_get_proc();
+    if(!caps) {
+        std::cout << "cap_get_proc() failed" << std::endl;
+        exit(1);
+    }
+    cap_value_t target_cap = CAP_SYS_RESOURCE;
+    if (
+        cap_set_flag(caps, CAP_EFFECTIVE, 1, &target_cap, CAP_SET) == -1
+        || cap_set_proc(caps) == -1
+        || cap_free(caps) == -1
+    ) {
+        std::cout << "unable to set capabilities" << std::endl;
+        exit(1);
+    }
+
+    /*if(setgid(65534) != 0 || setuid(65534) != 0) {
         std::cout << "unable to drop permissions" << std::endl;
         if(getuid() == 0) {
             std::cout << "cannot continue as root." << std::endl;
             exit(1);
         }
-    }
+    }*/
     execve("./ck-hypervisor-sandbox", &args_exec[0], &envp_exec[0]);
 }
 
@@ -88,7 +111,7 @@ Process::Process(const std::vector<std::string>& new_args) {
     io_map.setup_defaults();
 }
 
-bool Process::read_memory(unsigned long remote_addr, size_t len, uint8_t *data) {
+static bool read_process_memory(int os_pid, unsigned long remote_addr, size_t len, uint8_t *data) {
     if(len == 0) return true;
 
     iovec local_iov = {
@@ -103,7 +126,7 @@ bool Process::read_memory(unsigned long remote_addr, size_t len, uint8_t *data) 
     else return true;
 }
 
-bool Process::write_memory(unsigned long remote_addr, size_t len, const uint8_t *data) {
+static bool write_process_memory(int os_pid, unsigned long remote_addr, size_t len, const uint8_t *data) {
     if(len == 0) return true;
 
     iovec local_iov = {
@@ -116,6 +139,34 @@ bool Process::write_memory(unsigned long remote_addr, size_t len, const uint8_t 
     };
     if(process_vm_writev(os_pid, &local_iov, 1, &remote_iov, 1, 0) != len) return false;
     else return true;
+}
+
+static void print_regs(const user_regs_struct& regs) {
+    printf("rax: %p\n", (void *) regs.rax);
+    printf("rbx: %p\n", (void *) regs.rbx);
+    printf("rcx: %p\n", (void *) regs.rcx);
+    printf("rdx: %p\n", (void *) regs.rdx);
+    printf("rdi: %p\n", (void *) regs.rdi);
+    printf("rsi: %p\n", (void *) regs.rsi);
+    printf("rsp: %p\n", (void *) regs.rsp);
+    printf("rbp: %p\n", (void *) regs.rbp);
+    printf("r8: %p\n", (void *) regs.r8);
+    printf("r9: %p\n", (void *) regs.r9);
+    printf("r10: %p\n", (void *) regs.r10);
+    printf("r11: %p\n", (void *) regs.r11);
+    printf("r12: %p\n", (void *) regs.r12);
+    printf("r13: %p\n", (void *) regs.r13);
+    printf("r14: %p\n", (void *) regs.r14);
+    printf("r15: %p\n", (void *) regs.r15);
+    printf("rip: %p\n", (void *) regs.rip);
+}
+
+bool Process::read_memory(unsigned long remote_addr, size_t len, uint8_t *data) {
+    return read_process_memory(os_pid, remote_addr, len, data);
+}
+
+bool Process::write_memory(unsigned long remote_addr, size_t len, const uint8_t *data) {
+    return write_process_memory(os_pid, remote_addr, len, data);
 }
 
 std::optional<std::string> Process::read_c_string(unsigned long remote_addr, size_t max_size) {
@@ -282,7 +333,7 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
 
     if(sandbox_state.load() == SandboxState::NONE) switch(nr) {
         case __NR_execve: {
-            std::cout << "Entering sandbox: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+            std::cout << "Entering sandbox via execve: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
             sandbox_state.store(SandboxState::IN_EXEC);
             break;
         }
@@ -295,12 +346,16 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
             replace_value = 0;
             break;
         }
+        case CK_SYS_ENTER_SANDBOX_NO_FDMAP: {
+            std::cout << "Entering sandbox: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
+            sandbox_state.store(SandboxState::IN_SANDBOX_NO_FDMAP);
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            break;
+        }
         default: break;
     } else switch(nr) {
-        // process
-        case __NR_exit_group:
-            break;
-
         // IO
         case __NR_lseek:
         case __NR_write:
@@ -311,6 +366,9 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
         case __NR_recvmsg:
         case __NR_fstat:
         {
+            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
             int orig_fd = regs.rdi;
             if(auto desc = io_map.get_file_description(orig_fd)) {
                 if(desc->ty == FileInstanceType::USER) {
@@ -334,6 +392,9 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
         }
         case __NR_close:
         {
+            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
             int orig_fd = regs.rdi;
             if(auto desc = io_map.get_file_description(orig_fd)) {
                 if(desc->ty == FileInstanceType::USER) {
@@ -366,6 +427,7 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
         case __NR_brk:
         case __NR_mmap:
         case __NR_munmap:
+        case __NR_mprotect:
 
         // signal handling
         case __NR_rt_sigprocmask:
@@ -382,12 +444,22 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
 
         // sync
         case __NR_futex:
+
+        // process
+        case __NR_prctl:
+        case __NR_arch_prctl:
+        case __NR_set_tid_address:
+        case __NR_exit_group:
+        case __NR_exit:
             break;
 
         case __NR_readlink:
             break;
 
         case __NR_openat: {
+            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
             auto dirfd = io_map.get_file_description(regs.rdi);
             if(!dirfd) {
                 is_invalid = true;
@@ -408,6 +480,9 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
             break;
         }
         case __NR_open: {
+            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
             if(auto maybe_path = read_c_string(regs.rdi, 65536)) {
                 std::string path = std::move(maybe_path.value());
                 deferred.push_back([this, path(std::move(path))](user_regs_struct& regs) {
@@ -421,21 +496,6 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
             break;
         }
 
-        case __NR_arch_prctl: {
-            long code = regs.rdi;
-            if(code == ARCH_SET_FS || code == ARCH_GET_FS || code == ARCH_SET_GS || code == ARCH_GET_GS) {
-            } else {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-            }
-            break;
-        }
-        case __NR_set_tid_address: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = 0;
-            break;
-        }
         case CK_SYS_GET_ABI_VERSION: {
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
@@ -456,6 +516,124 @@ TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stops
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
             replace_value = vfd;
+            break;
+        }
+        case CK_SYS_ENABLE_FDMAP: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = -EINVAL;
+
+            if(sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
+            sandbox_state.store(SandboxState::IN_SANDBOX);
+            replace_value = 0;
+            break;
+        }
+        case CK_SYS_ATTACH_VFD: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = -EINVAL;
+
+            if(sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
+
+            int vfd = regs.rdi;
+            int os_fd = regs.rsi;
+            auto ty = (FileInstanceType) (uint32_t) regs.rdx;
+            unsigned long path_remote = regs.rcx;
+
+            std::string path;
+            if(path_remote) {
+                if(auto maybe_path = read_c_string(path_remote, 65536)) {
+                    path = std::move(maybe_path.value());
+                } else {
+                    break;
+                }
+            }
+            
+            bool ty_ok = false;
+            switch(ty) {
+                case FileInstanceType::IDMAP:
+                case FileInstanceType::HYPERVISOR:
+                case FileInstanceType::NORMAL:
+                case FileInstanceType::USER:
+                    ty_ok = true;
+                    break;
+
+                default:
+                    std::cout << "Unknown type: " << (uint32_t) ty << std::endl;
+                    break;
+            }
+
+            if(!ty_ok) break;
+
+            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
+            desc->ty = ty;
+            desc->path = path;
+            desc->os_fd = os_fd;
+            io_map.insert_file_description(vfd, std::move(desc));
+            replace_value = 0;
+
+            std::cout << "Attached os_fd " << os_fd << " to vfd " << vfd << std::endl;
+            break;
+        }
+        case CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER: {
+            user_regs_struct new_regs;
+            if(!read_memory(regs.rdi, sizeof(new_regs), (uint8_t *) &new_regs)) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EINVAL;
+                break;
+            }
+            new_regs.rax = 0;
+
+            regs.orig_rax = __NR_munmap;
+            regs.rdi = 0x70000000;
+            regs.rsi = 0x10000000;
+            ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
+
+            deferred.push_back([this, new_regs](user_regs_struct& regs) {
+                // FIXME: Will all registers always be set to the provided value successfully?
+                ptrace(PTRACE_SETREGS, os_pid, 0, &new_regs);
+                ptrace(PTRACE_GETREGS, os_pid, 0, &regs);
+                return false;
+            });
+            break;
+        }
+        case CK_SYS_SNAPSHOT_ME: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = -EINVAL;
+
+            auto snapshot = this->take_snapshot();
+            if(!snapshot) {
+                break;
+            }
+
+            auto serialized = std::shared_ptr<std::vector<uint8_t>>(new std::vector<uint8_t>(snapshot->serialize()));
+            {
+                std::lock_guard<std::mutex> lg(last_snapshot_mu);
+                last_snapshot = std::move(serialized);
+            }
+            replace_value = 1;
+            break;
+        }
+        case CK_SYS_GETPID: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+
+            __uint128_t pid = ck_pid;
+            if(write_memory(regs.rdi, 16, (uint8_t *) &pid)) replace_value = 0;
+            else replace_value = -EFAULT;
+            break;
+        }
+        case CK_SYS_DEBUG_PRINT_REGS: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            print_regs(regs);
             break;
         }
         default:
@@ -537,6 +715,110 @@ void Process::add_awaiter(std::function<void()>&& awaiter) {
     awaiters.push_back(std::move(awaiter));
 }
 
+static std::optional<std::vector<MemoryRangeSnapshot>> take_memory_snapshot(int os_pid) {
+    std::stringstream name_ss;
+    name_ss << "/proc/" << os_pid << "/maps";
+    std::string name = name_ss.str();
+
+    std::ifstream maps(name.c_str());
+    if(!maps) {
+        return std::nullopt;
+    }
+
+    std::regex re("([0-9a-f]+)-([0-9a-f]+) (....) ([0-9a-f]+) (..):(..) ([0-9]+)( *)(.*)");
+    std::vector<MemoryRangeSnapshot> result;
+
+    while(!maps.eof()) {
+        std::string line;
+        std::getline(maps, line);
+        
+        std::cmatch cm;
+        if(!std::regex_match(line.c_str(), cm, re)) {
+            break;
+        } else {
+            if(cm.size() != 10) {
+                printf("take_memory_snapshot: unexpected match size\n");
+                return std::nullopt;
+            }
+
+            uint64_t start = 0, end = 0;
+            std::string perms = cm[3].str(), path = cm[9].str();
+
+            {
+                std::stringstream ss;
+                ss << std::hex << cm[1];
+                ss >> start;
+            }
+            {
+                std::stringstream ss;
+                ss << std::hex << cm[2];
+                ss >> end;
+            }
+
+            if(end <= start) {
+                printf("take_memory_snapshot: end <= start\n");
+                return std::nullopt;
+            }
+
+            MemoryRangeSnapshot mss;
+            mss.start = start;
+            mss.data = std::vector<uint8_t>(end - start);
+            if(perms.size() != 4) {
+                printf("take_memory_snapshot: unexpected 'perms' length\n");
+                return std::nullopt;
+            }
+            if(perms[0] == 'r') mss.prot |= PROT_READ;
+            if(perms[1] == 'w') mss.prot |= PROT_WRITE;
+            if(perms[2] == 'x') mss.prot |= PROT_EXEC;
+
+            if(path == "[vvar]" || path == "[vdso]" || path == "[vsyscall]") {
+                continue; // do not dump these regions
+            }
+
+            if(path == "[heap]") {
+                mss.ty = MemoryRangeType::HEAP;
+            } else if(path == "[stack]") {
+                mss.ty = MemoryRangeType::STACK;
+            } else {
+                mss.ty = MemoryRangeType::DATA;
+            }
+
+            if(!read_process_memory(os_pid, mss.start, mss.data.size(), &mss.data[0])) {
+                printf("take_memory_snapshot: unable to read process memory from %lx to %lx\n", start, end);
+                continue;
+            }
+            result.push_back(std::move(mss));
+        }
+    }
+
+    return result;
+}
+
+std::shared_ptr<ProcessSnapshot> Process::take_snapshot() {
+    auto snapshot = std::shared_ptr<ProcessSnapshot>(new ProcessSnapshot);
+
+    snapshot->notify_invalid_syscall = this->notify_invalid_syscall.load();
+    ptrace(PTRACE_GETREGS, os_pid, 0, &snapshot->regs);
+
+    if(auto ss = take_memory_snapshot(os_pid)) {
+        snapshot->memory = std::move(ss.value());
+    } else {
+        return std::shared_ptr<ProcessSnapshot>();
+    }
+
+    snapshot->files = io_map.snapshot_files();
+
+    for(auto& s : snapshot->memory) {
+        printf("(memory) %lx %lu %d\n", s.start, s.data.size(), s.prot);
+    }
+    for(auto& f : snapshot->files) {
+        printf("(file) vfd=%d ty=%d\n", f.vfd, f.ty);
+    }
+    
+    auto serialized = snapshot->serialize();
+    return snapshot;
+}
+
 void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem) {
     if(session != 0) {
         send_reject(socket, "invalid kernel session");
@@ -554,9 +836,43 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             auto name_info = std::move(maybe_name_info.value());
             auto module_name = std::move(name_info.first);
             auto version_code = name_info.second;
+            std::string module_type = "";
+
             std::shared_ptr<DynamicModule> dm;
             try {
-                dm = DynamicModule::load_cached(module_name.c_str(), version_code);
+                static const std::string snapshot_prefix = "snapshot:";
+                if(auto [left, right] = std::mismatch(module_name.begin(), module_name.end(), snapshot_prefix.begin(), snapshot_prefix.end()); right == snapshot_prefix.end()) {
+                    std::string snapshot_pid;
+                    std::copy(left, module_name.end(), std::back_inserter(snapshot_pid));
+                    if(snapshot_pid.size() != 32) {
+                        throw std::runtime_error("bad snapshot pid size");
+                    }
+                    __uint128_t target = 0;
+                    {
+                        uint64_t *target_b = (uint64_t *) &target;
+                        if(sscanf(snapshot_pid.c_str(), "%016lx%016lx", &target_b[1], &target_b[0]) != 2) {
+                            throw std::runtime_error("invalid snapshot pid");
+                        }
+                    }
+                    auto remote_proc = global_process_set.get_process(target);
+                    if(!remote_proc) {
+                        throw std::runtime_error("remote process not found");
+                    }
+                    auto ss = remote_proc->get_last_snapshot();
+                    if(!ss) {
+                        throw std::runtime_error("no snapshot for the provided remote process");
+                    }
+                    dm = DynamicModule::load_cached(module_name.c_str(), VersionCode(), [&]() { return new DynamicModule([&](uint8_t *out) {
+                        std::copy(&(*ss)[0], &(*ss)[ss->size()], out);
+                    }, ss->size()); });
+                    module_type = "snapshot";
+                } else {
+                    dm = DynamicModule::load_cached(module_name.c_str(), version_code, [&]() {
+                        return new DynamicModule(module_name.c_str(), version_code);
+                    });
+                    module_type = "elf";
+                }
+                
             } catch(std::runtime_error& e) {
                 std::cout << "Error while trying to get module '" << module_name << "': " << e.what() << std::endl;
                 send_reject(socket, "missing/invalid module");
@@ -565,8 +881,8 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
 
             Message msg;
             msg.tag = MessageType::MODULE_OFFER;
-            msg.body = nullptr;
-            msg.body_len = 0;
+            msg.body = (const uint8_t *) &module_type[0];
+            msg.body_len = module_type.size();
             msg.fd = dm->mfd;
 
             msg.send(socket);

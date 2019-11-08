@@ -16,7 +16,20 @@
 DynamicModule::DynamicModule(const char *name, VersionCode version) {
     auto handle = global_registry.get_module(name, version);
     size_t body_size = handle->get_file_size();
-    module_size = round_up(body_size, getpagesize());
+
+    init([&](uint8_t *out) {
+        if(handle->read(out, body_size) != body_size) {
+            throw std::runtime_error("unable to read module from file");
+        }
+    }, body_size);
+}
+
+DynamicModule::DynamicModule(std::function<void(uint8_t *)> feed, size_t len) {
+    init(std::move(feed), len);
+}
+
+void DynamicModule::init(std::function<void(uint8_t *)> feed, size_t len) {
+    module_size = round_up(len, getpagesize());
 
     mfd = memfd_create("dynamic-module", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if(mfd < 0) throw std::runtime_error("unable to create shared memory");
@@ -30,11 +43,13 @@ DynamicModule::DynamicModule(const char *name, VersionCode version) {
         close(mfd);
         throw std::runtime_error("mmap on shared memory failed");
     }
-
-    if(handle->read(mapped, body_size) != body_size) {
+    
+    try {
+        feed(mapped);
+    } catch(std::runtime_error& e) {
         munmap(mapped, module_size);
         close(mfd);
-        throw std::runtime_error("unable to read module from file");
+        throw e;
     }
 
     munmap(mapped, module_size);
@@ -43,7 +58,6 @@ DynamicModule::DynamicModule(const char *name, VersionCode version) {
         close(mfd);
         throw std::runtime_error("unable to add seals");
     }
-
 }
 
 DynamicModule::~DynamicModule() {
@@ -53,7 +67,7 @@ DynamicModule::~DynamicModule() {
 static std::map<std::pair<std::string, VersionCode>, std::shared_ptr<DynamicModule>> dm_cache;
 static std::mutex dm_cache_mu;
 
-std::shared_ptr<DynamicModule> DynamicModule::load_cached(const char *name, VersionCode version) {
+std::shared_ptr<DynamicModule> DynamicModule::load_cached(const char *name, VersionCode version, std::function<DynamicModule *()> feed) {
     std::lock_guard<std::mutex> lg(dm_cache_mu);
 
     auto key = std::make_pair(std::string(name), version);
@@ -61,7 +75,7 @@ std::shared_ptr<DynamicModule> DynamicModule::load_cached(const char *name, Vers
     if(it != dm_cache.end()) {
         return it->second;
     } else {
-        auto v = std::shared_ptr<DynamicModule>(new DynamicModule(name, version));
+        auto v = std::shared_ptr<DynamicModule>(feed());
         dm_cache[key] = v;
         return v;
     }
