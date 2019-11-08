@@ -53,7 +53,7 @@ pub fn recv_message(recipient: &mut u128, session: &mut u64, tag: &mut u32, data
         IoVec::from_mut_slice(data),
     ] };
     match recvmsg(HYPERVISOR_FD, &iovs, None, MsgFlags::empty()) {
-        Ok(x) => Some(x.bytes),
+        Ok(x) => Some(x.bytes.checked_sub(16 + 8 + 4).expect("invalid message from hypervisor")),
         Err(_) => None,
     }
 }
@@ -78,7 +78,7 @@ pub fn trivial_kernel_request(tag: MessageType, data: &[u8]) -> Result<(), Strin
 
     match tag {
         MessageType::TRIVIAL_RESULT => {
-            if n_bytes != std::mem::size_of::<TrivialResult>() + 16 + 8 + 4 {
+            if n_bytes != std::mem::size_of::<TrivialResult>() {
                 panic!("invalid message size: {} {}", n_bytes, std::mem::size_of::<TrivialResult>());
             }
             unsafe {

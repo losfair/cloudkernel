@@ -91,9 +91,12 @@ impl ProcessCreationInfo {
                 offer.as_mut_ptr() as *mut u8,
                 std::mem::size_of::<ProcessOffer>(),
             ));
-            assert_eq!(result, Some(core::mem::size_of::<ProcessOffer>() + 16 + 8 + 4));
+            assert_eq!(result, Some(core::mem::size_of::<ProcessOffer>()));
             Ok(offer.assume_init())
         }
     }
 }
 
+pub fn create(full_name: &str) -> Result<u128, String> {
+    ProcessCreationInfo::new(full_name, false).send().map(|x| x.pid)
+}
