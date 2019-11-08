@@ -5,15 +5,8 @@
 #include <optional>
 #include <memory>
 #include <filesystem>
-
-
-enum class FileInstanceType {
-    INVALID,
-    IDMAP, // identical mapping
-    HYPERVISOR, // hypervisor fd
-    NORMAL, // normal files
-    USER, // triggers SIGSYS on I/O
-};
+#include "file_base.h"
+#include "snapshot.h"
 
 class FileDescription {
     public:
@@ -21,6 +14,7 @@ class FileDescription {
     int os_fd = -1;
     std::filesystem::path path;
     FileInstanceType ty = FileInstanceType::INVALID;
+    int flags = 0;
 
     static inline std::shared_ptr<FileDescription> with_idmap(int fd) {
         auto ret = std::shared_ptr<FileDescription>(new FileDescription);
@@ -40,12 +34,14 @@ class FileDescription {
 class IOMap {
     private:
     std::mutex mu;
-    int next_fd = 0;
     std::map<int, std::shared_ptr<FileDescription>> fd_map;
+    int next_fd_locked();
 
     public:
     void setup_defaults();
     std::shared_ptr<FileDescription> get_file_description(int fd);
     bool remove_file_description(int fd);
     int insert_file_description(std::shared_ptr<FileDescription>&& description);
+    void insert_file_description(int fd, std::shared_ptr<FileDescription>&& description);
+    std::vector<FileSnapshot> snapshot_files();
 };

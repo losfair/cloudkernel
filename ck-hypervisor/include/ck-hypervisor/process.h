@@ -20,6 +20,7 @@
 #include <ck-hypervisor/bqueue.h>
 #include <ck-hypervisor/owned_message.h>
 #include <ck-hypervisor/iomap.h>
+#include <ck-hypervisor/snapshot.h>
 
 using ck_pid_t = __uint128_t;
 
@@ -32,6 +33,7 @@ enum class TraceContinuationState {
 enum class SandboxState {
     NONE,
     IN_EXEC,
+    IN_SANDBOX_NO_FDMAP,
     IN_SANDBOX,
 };
 
@@ -50,6 +52,9 @@ class Process {
     std::atomic<SandboxState> sandbox_state = std::atomic<SandboxState>(SandboxState::NONE);
     IOMap io_map;
     std::atomic<bool> notify_invalid_syscall = std::atomic<bool>(false);
+    std::string image_type;
+    std::mutex last_snapshot_mu;
+    std::shared_ptr<std::vector<uint8_t>> last_snapshot;
 
     void serve_sandbox();
     void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem);
@@ -71,6 +76,7 @@ class Process {
     }
     std::optional<std::string> read_c_string(unsigned long remote_addr, size_t max_size);
     bool register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path);
+    std::shared_ptr<ProcessSnapshot> take_snapshot();
 
     public:
     std::vector<std::string> args;
@@ -84,6 +90,11 @@ class Process {
 
     void run();
     void add_awaiter(std::function<void()>&& awaiter);
+    std::shared_ptr<std::vector<uint8_t>> get_last_snapshot() {
+        std::lock_guard<std::mutex> lg(last_snapshot_mu);
+        auto ret = last_snapshot;
+        return ret;
+    }
 };
 
 class ProcessSet {
