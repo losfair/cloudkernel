@@ -14,7 +14,7 @@ set(CMAKE_CXX_FLAGS -Wall)
 set_source_files_properties(${SANDBOX_SOURCES} PROPERTIES COMPILE_FLAGS "-static" )
 
 add_executable(ck-hypervisor ${SOURCES})
-target_link_libraries(ck-hypervisor pthread)
+target_link_libraries(ck-hypervisor pthread cap)
 
 add_executable(ck-hypervisor-sandbox ${SANDBOX_SOURCES})
 target_link_libraries(ck-hypervisor-sandbox seccomp)
