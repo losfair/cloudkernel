@@ -1,6 +1,8 @@
 #include <ck-hypervisor/metadata.h>
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/syscall.h>
+#include <ck-hypervisor/file_base.h>
+#include <ck-hypervisor/byteutils.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -10,7 +12,6 @@
 #include <signal.h>
 #include <sys/ucontext.h>
 #include <sys/socket.h>
-#include <vector>
 #include <stdexcept>
 #include <string.h>
 #include <sys/mman.h>
@@ -23,13 +24,16 @@
 #include <optional>
 #include <assert.h>
 #include <elf.h>
+#include <sys/user.h>
 
 #include "cc.h"
+#include "snapshot_parser.h"
 
 #define __round_mask(x, y) ((__typeof__(x))((y) - 1))
 #define round_up(x, y) ((((x) - 1) | __round_mask(x, y)) + 1)
 
 int hypervisor_fd = -1;
+uint8_t __attribute__((aligned(16))) launchpad_stack[65536 * 16];
 
 void debug_print(const char *text) {
     Message msg;
@@ -37,6 +41,59 @@ void debug_print(const char *text) {
     msg.body = (const uint8_t *) text;
     msg.body_len = strlen(text);
     assert(msg.send(hypervisor_fd) >= 0);
+}
+
+static long __attribute__((naked)) report_hypervisor_fd(int fd) {
+    asm(
+        "movq $" _STR(CK_SYS_SET_REMOTE_HYPERVISOR_FD) ", %rax\n"
+        "syscall\n"
+        "ret\n"
+    );
+}
+
+static long __attribute__((naked)) enter_sandbox_no_fdmap() {
+    asm(
+        "movq $" _STR(CK_SYS_ENTER_SANDBOX_NO_FDMAP) ", %rax\n"
+        "syscall\n"
+        "ret\n"
+    );
+}
+
+static long __attribute__((naked)) enable_fdmap() {
+    asm(
+        "movq $" _STR(CK_SYS_ENABLE_FDMAP) ", %rax\n"
+        "syscall\n"
+        "ret\n"
+    );
+}
+
+static void __attribute__((naked, noreturn)) invoke_noreturn_on_stack(void *stack, void *f, void *userdata) {
+    asm(
+        "movq %rdi, %rsp\n"
+        "movq %rdx, %rdi\n"
+        "pushq $0\n" // return address = nullptr
+        "jmpq *%rsi\n"
+    );
+}
+
+static long __attribute__((naked, noreturn)) load_processor_state_and_unmap_loader(user_regs_struct *regs) {
+    asm(
+        "movq $" _STR(CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER) ", %rax\n"
+        "syscall\n"
+        "ud2\n"
+    );
+}
+
+struct SnapshotInvocationContext {
+    void *image_mapping;
+    size_t image_size;
+};
+
+void invoke_snapshot(SnapshotInvocationContext *ctx) {
+    user_regs_struct regs;
+    load_snapshot((const uint8_t *) ctx->image_mapping, ctx->image_size, regs); // `ctx` becomes invalid after this
+    enable_fdmap();
+    load_processor_state_and_unmap_loader(&regs);
 }
 
 struct MapInfo {
@@ -79,6 +136,13 @@ struct SharedModule {
             execv(mfd_path.c_str(), (char *const *) argv);
             std::cout << "execv() failed" << std::endl;
             abort();
+        } else if(module_type == "snapshot") {
+            enter_sandbox_no_fdmap();
+            SnapshotInvocationContext ctx = {
+                .image_mapping = image_mapping,
+                .image_size = image_size,
+            };
+            invoke_noreturn_on_stack((void *) (launchpad_stack + sizeof(launchpad_stack)), (void *) invoke_snapshot, (void *) &ctx);
         }
         abort();
     }
@@ -142,7 +206,7 @@ struct SharedModule {
                 if(image_size < 0) this->image_size = 0;
                 else this->image_size = image_size;
 
-                image_mapping = mmap(nullptr, this->image_size, PROT_READ, MAP_PRIVATE, mfd, 0);
+                image_mapping = mmap((void *) CK_LOADER_MMAP_BASE, this->image_size, PROT_READ, MAP_PRIVATE, mfd, 0);
                 if(image_mapping == MAP_FAILED) {
                     throw std::runtime_error("failed to map image into memory");
                 }
@@ -152,14 +216,6 @@ struct SharedModule {
         }
     }
 };
-
-static long __attribute__((naked)) report_hypervisor_fd(int fd) {
-    asm(
-        "movq $" _STR(CK_SYS_SET_REMOTE_HYPERVISOR_FD) ", %rax\n"
-        "syscall\n"
-        "ret\n"
-    );
-}
 
 static SharedModule init_mod;
 
