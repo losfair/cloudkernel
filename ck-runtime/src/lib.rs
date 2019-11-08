@@ -3,6 +3,8 @@
 pub mod hook;
 pub mod ipc;
 pub mod net;
+pub mod snapshot;
+pub mod process;
 
 pub use nix;
 
