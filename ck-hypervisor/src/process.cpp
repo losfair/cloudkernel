@@ -22,6 +22,7 @@
 #include <ck-hypervisor/process_api.h>
 #include <ck-hypervisor/syscall.h>
 #include <regex>
+#include <chrono>
 #include <pthread.h>
 #include <assert.h>
 #include <sys/mman.h>
@@ -63,7 +64,7 @@ void Process::run_as_child(int socket) {
     int flags = fcntl(socket, F_GETFD, 0);
     flags &= ~FD_CLOEXEC;
     if(fcntl(socket, F_SETFD, flags) < 0) {
-        std::cout << "unable to clear cloexec" << std::endl;
+        printf("unable to clear cloexec flag\n");
         exit(1);
     }
 
@@ -81,9 +82,9 @@ void Process::run_as_child(int socket) {
     envp_exec.push_back(nullptr);
 
     if(setgid(65534) != 0 || setuid(65534) != 0) {
-        std::cout << "unable to drop permissions" << std::endl;
+        printf("unable to drop permissions\n");
         if(getuid() == 0) {
-            std::cout << "cannot continue as root." << std::endl;
+            printf("cannot continue as root.\n");
             exit(1);
         }
     }
@@ -154,22 +155,6 @@ bool Process::write_memory(unsigned long remote_addr, size_t len, const uint8_t 
     return write_process_memory(os_pid, remote_addr, len, data);
 }
 
-std::optional<std::string> Process::read_c_string(unsigned long remote_addr, size_t max_size) {
-    std::string s;
-    while(true) {
-        errno = 0;
-        long word = ptrace(PTRACE_PEEKDATA, os_pid, (void *) remote_addr, nullptr);
-        if(errno) return std::nullopt;
-        uint8_t *bytes = (uint8_t *) &word;
-        for(int i = 0; i < sizeof(word); i++) {
-            if(bytes[i] == 0) return s;
-            if(s.size() == max_size) return std::nullopt;
-            s.push_back(bytes[i]);
-        }
-        remote_addr += sizeof(word);
-    }
-}
-
 void Process::run() {
     int sockets[2];
 
@@ -179,7 +164,8 @@ void Process::run() {
 
     std::promise<void> child_pid;
     std::future<void> child_pid_fut = child_pid.get_future();
-    ptrace_monitor = std::thread([this, &child_pid, sockets]() {
+
+    std::thread([this, &child_pid, sockets]() {
         int new_pid = fork();
         if(new_pid < 0) throw std::runtime_error("unable to create process");
         if(new_pid == 0) {
@@ -188,15 +174,22 @@ void Process::run() {
             _exit(1);
         }
         os_pid = new_pid;
+
+        auto th = Thread::first_thread(this); // reads `os_pid`
+        Thread *th_ref = &*th;
+        {
+            std::lock_guard<std::mutex> lg(threads_mu);
+            threads[th->os_tid] = std::move(th);
+        }
+
+        // The new thread must have been inserted to `this->threads` before we can allow `Process::run` to return,
+        // to ensure that the `Process` object has a strictly longer lifetime than any thread it contains.
+        // Otherwise the `Process` destructor might not observe the newly created thread, and `Thread` will try to
+        // use a dangling pointer to access the process it belongs to.
         child_pid.set_value();
 
-        try {
-            run_ptrace_monitor();
-        } catch(const std::runtime_error& e) {
-            std::cout << "ptrace monitor exited with error: " << e.what() << std::endl;
-        }
-        global_process_set.notify_termination(this->ck_pid);
-    });
+        th_ref->run();
+    }).detach();
 
     child_pid_fut.wait();
     close(sockets[1]);
@@ -209,13 +202,21 @@ void Process::run() {
 }
 
 Process::~Process() {
-    kill_requested.store(true);
-    kill(os_pid, SIGTERM);
+    kill(os_pid, SIGKILL);
+    waitpid(os_pid, nullptr, 0);
 
     pending_messages.close();
-
-    ptrace_monitor.join(); // ptrace_monitor will handle the waitpid() cleanup stuff.
     socket_listener.join();
+
+    // wait for all threads to terminate
+    while(true) {
+        {
+            std::lock_guard<std::mutex> lg(threads_mu);
+            if(threads.empty()) break;
+        }
+        using namespace std::chrono_literals;
+        std::this_thread::sleep_for(10ms);
+    }
 
     close(socket);
 
@@ -223,479 +224,6 @@ Process::~Process() {
         std::lock_guard<std::mutex> lg(awaiters_mu);
         for(auto& f : awaiters) f();
     }
-}
-
-void Process::run_ptrace_monitor() {
-    int wstatus;
-    assert(waitpid(os_pid, &wstatus, 0) >= 0);
-
-    if(WSTOPSIG(wstatus) != SIGSTOP) {
-        throw std::runtime_error("Expecting a SIGSTOP but got something else.");
-    }
-
-    if(ptrace(PTRACE_SETOPTIONS, os_pid, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD) < 0) {
-        throw std::runtime_error("Unable to call ptrace() on sandbox process.");
-    }
-
-    //std::cout << "Monitor initialized on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
-
-    int stopsig = 0;
-
-    while(true) {
-        ptrace(PTRACE_SYSCALL, os_pid, 0, stopsig);
-        assert(waitpid(os_pid, &wstatus, 0) >= 0);
-
-        // Normal exit or killed.
-        if(WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
-            break;
-        }
-
-        stopsig = WSTOPSIG(wstatus);
-
-        user_regs_struct regs = {};
-        ptrace(PTRACE_GETREGS, os_pid, 0, &regs);
-
-        TraceContinuationState tcs = TraceContinuationState::CLEANUP;
-        if(stopsig == (SIGTRAP | 0x80)) { // system call
-            tcs = handle_syscall(regs, stopsig);
-            if(tcs == TraceContinuationState::CONTINUE && stopsig != (SIGTRAP | 0x80)) {
-                tcs = handle_signal(regs, stopsig);
-            } else {
-                stopsig = 0;
-            }
-        } else {
-            tcs = handle_signal(regs, stopsig);
-        }
-
-        switch(tcs) {
-            case TraceContinuationState::CONTINUE:
-                break;
-            case TraceContinuationState::CLEANUP:
-                kill(os_pid, SIGKILL);
-                assert(waitpid(os_pid, &wstatus, 0) >= 0);
-                if(!WIFSIGNALED(wstatus)) {
-                    throw std::runtime_error("Got unexpected status after sending SIGKILL.");
-                }
-                goto out;
-            case TraceContinuationState::BREAK:
-                goto out;
-            default: assert(false);
-        }
-    }
-
-    out:;
-
-    //std::cout << "Monitor exited on process " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
-}
-
-enum class SyscallFixupMethod {
-    SET_VALUE,
-    SEND_SIGSYS,
-};
-
-bool Process::register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path) {
-    if(regs.rax >= 0) {
-        auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-        desc->os_fd = regs.rax;
-        desc->path = parent_path;
-        desc->path += path;
-        desc->ty = FileInstanceType::NORMAL;
-        int vfd = io_map.insert_file_description(std::move(desc));
-        regs.rax = vfd;
-        ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-    }
-
-    return false; // is_invalid = false
-}
-
-TraceContinuationState Process::handle_syscall(user_regs_struct regs, int& stopsig_out) {
-    bool is_invalid = false;
-    SyscallFixupMethod fixup_method = SyscallFixupMethod::SET_VALUE;
-    long replace_value = -EPERM;
-
-    long nr = regs.orig_rax;
-    std::vector<DeferredSyscallHandler> deferred;
-
-    if(sandbox_state.load() == SandboxState::NONE) switch(nr) {
-        case __NR_execve: {
-            //std::cout << "Entering sandbox via execve: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
-            sandbox_state.store(SandboxState::IN_EXEC);
-            break;
-        }
-        case CK_SYS_SET_REMOTE_HYPERVISOR_FD: {
-            int remote_fd = regs.rdi;
-            int vfd = io_map.insert_file_description(FileDescription::with_hypervisor_fd(remote_fd));
-            //std::cout << "Remote hypervisor fd: " << remote_fd << "->" << vfd << std::endl;
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = 0;
-            break;
-        }
-        case CK_SYS_ENTER_SANDBOX_NO_FDMAP: {
-            //std::cout << "Entering sandbox: " << os_pid << "/" << stringify_ck_pid(ck_pid) << std::endl;
-            sandbox_state.store(SandboxState::IN_SANDBOX_NO_FDMAP);
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = 0;
-            break;
-        }
-        default: break;
-    } else switch(nr) {
-        // IO
-        case __NR_lseek:
-        case __NR_write:
-        case __NR_read:
-        case __NR_sendto:
-        case __NR_recvfrom:
-        case __NR_sendmsg:
-        case __NR_recvmsg:
-        case __NR_fstat:
-        {
-            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-            int orig_fd = regs.rdi;
-            if(auto desc = io_map.get_file_description(orig_fd)) {
-                if(desc->ty == FileInstanceType::USER) {
-                    is_invalid = true;
-                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-                } else {
-                    regs.rdi = desc->os_fd;
-                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-                    deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
-                        regs.rdi = orig_fd;
-                        ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-                        return false;
-                    });
-                }
-            } else {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EBADF;
-            }
-            break;
-        }
-        case __NR_close:
-        {
-            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-            int orig_fd = regs.rdi;
-            if(auto desc = io_map.get_file_description(orig_fd)) {
-                if(desc->ty == FileInstanceType::USER) {
-                    is_invalid = true;
-                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-
-                    // `deferred` won't be executed if is_invalid == true.
-                    io_map.remove_file_description(orig_fd);
-                } else {
-                    regs.rdi = desc->os_fd;
-                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-                    deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
-                        if(regs.rax == 0) {
-                            io_map.remove_file_description(orig_fd);
-                        }
-                        regs.rdi = orig_fd;
-                        ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-                        return false;
-                    });
-                }
-            } else {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EBADF;
-            }
-            break;
-        }
-
-        // memory
-        case __NR_brk:
-        case __NR_mmap:
-        case __NR_munmap:
-        case __NR_mprotect:
-        case __NR_madvise:
-
-        // signal handling
-        case __NR_rt_sigprocmask:
-        case __NR_rt_sigreturn:
-        case __NR_rt_sigaction:
-        case __NR_sigaltstack:
-
-        // sleep
-        case __NR_nanosleep:
-        case __NR_clock_nanosleep:
-
-        // system information
-        case __NR_uname:
-
-        // sync
-        case __NR_futex:
-
-        // process
-        case __NR_prctl:
-        case __NR_arch_prctl:
-        case __NR_set_tid_address:
-        case __NR_exit_group:
-        case __NR_exit:
-
-        // random
-        case __NR_getrandom:
-            break;
-
-        case __NR_readlink:
-            break;
-
-        case __NR_openat: {
-            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-            auto dirfd = io_map.get_file_description(regs.rdi);
-            if(!dirfd) {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EBADF;
-                break;
-            }
-            if(auto maybe_path = read_c_string(regs.rsi, 65536)) {
-                std::string path = std::move(maybe_path.value());
-                deferred.push_back([this, dirfd(std::move(dirfd)), path(std::move(path))](user_regs_struct& regs) {
-                    return register_returned_fd_after_syscall(regs, dirfd->path, path);
-                });
-            } else {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EFAULT;
-            }
-            break;
-        }
-        case __NR_open: {
-            if(sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-            if(auto maybe_path = read_c_string(regs.rdi, 65536)) {
-                std::string path = std::move(maybe_path.value());
-                deferred.push_back([this, path(std::move(path))](user_regs_struct& regs) {
-                    return register_returned_fd_after_syscall(regs, {}, path);
-                });
-            } else {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EFAULT;
-            }
-            break;
-        }
-
-        case CK_SYS_GET_ABI_VERSION: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = CK_ABI_VERSION;
-            break;
-        }
-        case CK_SYS_NOTIFY_INVALID_SYSCALL: {
-            notify_invalid_syscall.store(true);
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = 0;
-            break;
-        }
-        case CK_SYS_CREATE_USER_FD: {
-            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-            desc->ty = FileInstanceType::USER;
-            int vfd = io_map.insert_file_description(std::move(desc));
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = vfd;
-            break;
-        }
-        case CK_SYS_ENABLE_FDMAP: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = -EINVAL;
-
-            if(sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-            sandbox_state.store(SandboxState::IN_SANDBOX);
-            replace_value = 0;
-            break;
-        }
-        case CK_SYS_ATTACH_VFD: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = -EINVAL;
-
-            if(sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-
-            int vfd = regs.rdi;
-            int os_fd = regs.rsi;
-            auto ty = (FileInstanceType) (uint32_t) regs.rdx;
-            unsigned long path_remote = regs.rcx;
-
-            std::string path;
-            if(path_remote) {
-                if(auto maybe_path = read_c_string(path_remote, 65536)) {
-                    path = std::move(maybe_path.value());
-                } else {
-                    break;
-                }
-            }
-            
-            bool ty_ok = false;
-            switch(ty) {
-                case FileInstanceType::IDMAP:
-                case FileInstanceType::HYPERVISOR:
-                case FileInstanceType::NORMAL:
-                case FileInstanceType::USER:
-                    ty_ok = true;
-                    break;
-
-                default:
-                    std::cout << "Unknown type: " << (uint32_t) ty << std::endl;
-                    break;
-            }
-
-            if(!ty_ok) break;
-
-            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-            desc->ty = ty;
-            desc->path = path;
-            desc->os_fd = os_fd;
-            io_map.insert_file_description(vfd, std::move(desc));
-            replace_value = 0;
-
-            std::cout << "Attached os_fd " << os_fd << " to vfd " << vfd << std::endl;
-            break;
-        }
-        case CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER: {
-            user_regs_struct new_regs;
-            if(!read_memory(regs.rdi, sizeof(new_regs), (uint8_t *) &new_regs)) {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EINVAL;
-                break;
-            }
-            new_regs.rax = 0;
-
-            regs.orig_rax = __NR_munmap;
-            regs.rdi = 0x70000000;
-            regs.rsi = 0x10000000;
-            ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-
-            deferred.push_back([this, new_regs](user_regs_struct& regs) {
-                // FIXME: Will all registers always be set to the provided value successfully?
-                ptrace(PTRACE_SETREGS, os_pid, 0, &new_regs);
-                ptrace(PTRACE_GETREGS, os_pid, 0, &regs);
-                return false;
-            });
-            break;
-        }
-        case CK_SYS_SNAPSHOT_ME: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = -EINVAL;
-
-            auto snapshot = this->take_snapshot();
-            if(!snapshot) {
-                break;
-            }
-
-            {
-                std::lock_guard<std::mutex> lg(last_snapshot_mu);
-                last_snapshot = std::move(snapshot);
-            }
-            replace_value = 1;
-            break;
-        }
-        case CK_SYS_GETPID: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-
-            __uint128_t pid = ck_pid;
-            if(write_memory(regs.rdi, 16, (uint8_t *) &pid)) replace_value = 0;
-            else replace_value = -EFAULT;
-            break;
-        }
-        case CK_SYS_DEBUG_PRINT_REGS: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = 0;
-            print_regs(regs);
-            break;
-        }
-        default:
-            if(permissive_mode) {
-                std::cout << "Warning (permissive mode): Process " << os_pid << "/" << stringify_ck_pid(ck_pid) << " invoked an unknown syscall: " << nr << std::endl;
-            } else {
-                is_invalid = true;
-                if(notify_invalid_syscall.load()) {
-                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-                } else {
-                    std::cout << "Invalid syscall: " << nr << std::endl;
-                    fixup_method = SyscallFixupMethod::SET_VALUE;
-                    replace_value = -EPERM;
-                }
-            }
-            break;
-    }
-
-    if(is_invalid) {
-        regs.orig_rax = __NR_getpid;
-        ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-    }
-
-    ptrace(PTRACE_SYSCALL, os_pid, 0, 0);
-    int wstatus = 0;
-    assert(waitpid(os_pid, &wstatus, 0) >= 0);
-
-    int stopsig = WSTOPSIG(wstatus);
-    if(WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
-        return TraceContinuationState::BREAK;
-    }
-
-    stopsig = WSTOPSIG(wstatus);
-    if(stopsig == (SIGTRAP | 0x80)) {
-        ptrace(PTRACE_GETREGS, os_pid, 0, &regs);
-        if(!is_invalid) for(auto it = deferred.rbegin(); it != deferred.rend(); it++) {
-            is_invalid = (*it)(regs);
-            if(is_invalid) {
-                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-                break;
-            }
-        }
-        if(is_invalid) {
-            switch(fixup_method) {
-                case SyscallFixupMethod::SET_VALUE: {
-                    regs.rax = replace_value;
-                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-                    break;
-                }
-                case SyscallFixupMethod::SEND_SIGSYS: {
-                    regs.rax = nr;
-                    ptrace(PTRACE_SETREGS, os_pid, 0, &regs);
-                    kill(os_pid, SIGSYS);
-                    break;
-                }
-                default: assert(false);
-            }
-        }
-    } else {
-        stopsig_out = stopsig;
-    }
-
-    return TraceContinuationState::CONTINUE;
-}
-
-TraceContinuationState Process::handle_signal(user_regs_struct regs, int& sig) {
-    if(sig == SIGTERM && kill_requested.load()) {
-        return TraceContinuationState::CLEANUP;
-    }
-    if(sig == SIGTRAP && this->sandbox_state.load() == SandboxState::IN_EXEC) {
-        sig = 0;
-        this->sandbox_state.store(SandboxState::IN_SANDBOX);
-    }
-    return TraceContinuationState::CONTINUE;
 }
 
 void Process::add_awaiter(std::function<void()>&& awaiter) {
@@ -816,7 +344,7 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             std::string full_name((const char *) data, rem);
             auto maybe_name_info = parse_module_full_name(full_name.c_str());
             if(!maybe_name_info) {
-                std::cout << "Invalid module full name: " << full_name << std::endl;
+                printf("handle_kernel_message: MODULE_REQUEST: Invalid module full name: %s\n", full_name.c_str());
                 send_reject(socket, "invalid module name");
                 break;
             }
@@ -861,7 +389,7 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
                 }
                 
             } catch(std::runtime_error& e) {
-                std::cout << "Error while trying to get module '" << module_name << "': " << e.what() << std::endl;
+                printf("Error while trying to get module '%s': %s\n", module_name.c_str(), e.what());
                 send_reject(socket, "missing/invalid module");
                 break;
             }
@@ -927,7 +455,8 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
         }
         case MessageType::DEBUG_PRINT: {
             std::string message((const char *) data, rem);
-            std::cout << "[" << stringify_ck_pid(this->ck_pid) << "] " << message << std::endl;
+            auto ck_pid_s = stringify_ck_pid(this->ck_pid);
+            printf("[%s] %s\n", ck_pid_s.c_str(), message.c_str());
             break;
         }
         case MessageType::PROCESS_WAIT: {
@@ -1080,6 +609,613 @@ void Process::serve_sandbox() {
             }
         }
     }
+}
+
+Thread::~Thread() {
+
+}
+
+std::unique_ptr<Thread> Thread::from_os_thread(Process *process, int os_tid) {
+    auto ret = std::unique_ptr<Thread>(new Thread);
+    ret->process = process;
+    ret->os_tid = os_tid;
+    return ret;
+}
+
+std::unique_ptr<Thread> Thread::first_thread(Process *process) {
+    auto ret = std::unique_ptr<Thread>(new Thread);
+    ret->process = process;
+    ret->os_tid = process->os_pid;
+    return ret;
+}
+
+std::optional<std::string> Thread::read_c_string(unsigned long remote_addr, size_t max_size) {
+    std::string s;
+    while(true) {
+        errno = 0;
+        long word = ptrace(PTRACE_PEEKDATA, os_tid, (void *) remote_addr, nullptr);
+        if(errno) return std::nullopt;
+        uint8_t *bytes = (uint8_t *) &word;
+        for(int i = 0; i < sizeof(word); i++) {
+            if(bytes[i] == 0) return s;
+            if(s.size() == max_size) return std::nullopt;
+            s.push_back(bytes[i]);
+        }
+        remote_addr += sizeof(word);
+    }
+}
+
+void Thread::run() {
+    try {
+        run_ptrace_monitor();
+    } catch(const std::runtime_error& e) {
+        printf("ptrace monitor exited with error: %s\n", e.what());
+    }
+    {
+        std::lock_guard<std::mutex> lg(process->threads_mu);
+        if(auto it = process->threads.find(os_tid); it != process->threads.end()) {
+            // This is the ONLY place where `process->threads.erase` is allowed to happen.
+            process->threads.erase(it);
+        } else {
+            throw std::logic_error("Thread id not found in process->threads");
+        }
+    }
+    if(os_tid == this->process->os_pid) {
+        global_process_set.notify_termination(this->process->ck_pid);
+    }
+}
+
+void Thread::run_ptrace_monitor() {
+    int wstatus;
+    if(waitpid(os_tid, &wstatus, 0) < 0) return;
+
+    if(WSTOPSIG(wstatus) != SIGSTOP) {
+        return;
+    }
+
+    if(ptrace(PTRACE_SETOPTIONS, os_tid, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACECLONE) < 0) {
+        printf("Unable to call ptrace() on sandbox thread.\n");
+        return;
+    }
+
+    {
+        auto ck_pid_s = stringify_ck_pid(process->ck_pid);
+        printf("Monitor initialized on thread %d/%s\n", os_tid, ck_pid_s.c_str());
+    }
+
+    int stopsig = 0;
+
+    while(true) {
+        ptrace(PTRACE_SYSCALL, os_tid, 0, stopsig);
+        if(waitpid(os_tid, &wstatus, 0) < 0) break;
+
+        // Normal exit or killed.
+        if(WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
+            break;
+        }
+
+        stopsig = WSTOPSIG(wstatus);
+
+        user_regs_struct regs = {};
+        ptrace(PTRACE_GETREGS, os_tid, 0, &regs);
+
+        TraceContinuationState tcs = TraceContinuationState::BREAK;
+        if(stopsig == (SIGTRAP | 0x80)) { // system call
+            tcs = handle_syscall(regs, stopsig);
+            if(tcs == TraceContinuationState::CONTINUE && stopsig != (SIGTRAP | 0x80)) {
+                tcs = handle_signal(regs, stopsig);
+            } else {
+                stopsig = 0;
+            }
+        } else {
+            tcs = handle_signal(regs, stopsig);
+        }
+
+        switch(tcs) {
+            case TraceContinuationState::CONTINUE:
+                break;
+            case TraceContinuationState::BREAK:
+                goto out;
+            default: assert(false);
+        }
+    }
+
+    out:;
+
+    {
+        auto ck_pid_s = stringify_ck_pid(process->ck_pid);
+        printf("Monitor exited on thread %d/%s\n", os_tid, ck_pid_s.c_str());
+    }
+}
+
+bool Thread::register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path) {
+    if(regs.rax >= 0) {
+        auto desc = std::shared_ptr<FileDescription>(new FileDescription);
+        desc->os_fd = regs.rax;
+        desc->path = parent_path;
+        desc->path += path;
+        desc->ty = FileInstanceType::NORMAL;
+        int vfd = process->io_map.insert_file_description(std::move(desc));
+        regs.rax = vfd;
+        ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+    }
+
+    return false; // is_invalid = false
+}
+
+TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsig_out) {
+    bool is_invalid = false;
+    SyscallFixupMethod fixup_method = SyscallFixupMethod::SET_VALUE;
+    long replace_value = -EPERM;
+
+    long nr = regs.orig_rax;
+    std::vector<DeferredSyscallHandler> deferred;
+
+    if(process->sandbox_state.load() == SandboxState::NONE) switch(nr) {
+        case __NR_execve: {
+            process->sandbox_state.store(SandboxState::IN_EXEC);
+            break;
+        }
+        case CK_SYS_SET_REMOTE_HYPERVISOR_FD: {
+            int remote_fd = regs.rdi;
+            int vfd = process->io_map.insert_file_description(FileDescription::with_hypervisor_fd(remote_fd));
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            break;
+        }
+        case CK_SYS_ENTER_SANDBOX_NO_FDMAP: {
+            process->sandbox_state.store(SandboxState::IN_SANDBOX_NO_FDMAP);
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            break;
+        }
+        default: break;
+    } else switch(nr) {
+        // IO
+        case __NR_lseek:
+        case __NR_write:
+        case __NR_read:
+        case __NR_sendto:
+        case __NR_recvfrom:
+        case __NR_sendmsg:
+        case __NR_recvmsg:
+        case __NR_fstat:
+        case __NR_fcntl:
+        {
+            map_fd_param0(regs, is_invalid, fixup_method, replace_value, deferred);
+            break;
+        }
+        case __NR_close:
+        {
+            if(process->sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
+            int64_t orig_fd = regs.rdi;
+            if(auto desc = process->io_map.get_file_description(orig_fd)) {
+                if(desc->ty == FileInstanceType::USER) {
+                    is_invalid = true;
+                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+
+                    // `deferred` won't be executed if is_invalid == true.
+                    process->io_map.remove_file_description(orig_fd);
+                } else {
+                    regs.rdi = desc->os_fd;
+                    ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+                    deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
+                        if(regs.rax == 0) {
+                            process->io_map.remove_file_description(orig_fd);
+                        }
+                        regs.rdi = orig_fd;
+                        ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+                        return false;
+                    });
+                }
+            } else {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EBADF;
+            }
+            break;
+        }
+
+        // memory
+        case __NR_brk:
+        case __NR_mmap:
+        case __NR_munmap:
+        case __NR_mprotect:
+        case __NR_madvise:
+
+        // signal handling
+        case __NR_rt_sigprocmask:
+        case __NR_rt_sigreturn:
+        case __NR_rt_sigaction:
+        case __NR_sigaltstack:
+
+        // sleep
+        case __NR_nanosleep:
+        case __NR_clock_nanosleep:
+
+        // system information
+        case __NR_uname:
+
+        // sync
+        case __NR_futex:
+
+        // process
+        case __NR_prctl:
+        case __NR_arch_prctl:
+        case __NR_set_tid_address:
+        case __NR_exit_group:
+        case __NR_exit:
+        case __NR_restart_syscall:
+        case __NR_sched_getaffinity:
+        case __NR_getpid:
+        case __NR_gettid:
+
+        // random
+        case __NR_getrandom:
+            break;
+
+        case __NR_readlink:
+            break;
+
+        // Only allow `clone` to create threads, but not full processes.
+        case __NR_clone: {
+            static const int allowed_flags =
+                CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+                CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
+                CLONE_DETACHED;
+            static const int required_flags = CLONE_VM | CLONE_THREAD;
+
+            if((regs.rdi & (~allowed_flags)) != 0 || (regs.rdi & required_flags) != required_flags) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EPERM;
+                auto ck_pid_s = stringify_ck_pid(this->process->ck_pid);
+                printf("Warning: Thread %d/%d/%s is trying to call clone() with disallowed flags.\n", this->process->os_pid, this->os_tid, ck_pid_s.c_str());
+                break;
+            } else {
+
+            }
+            break;
+        }
+
+        case __NR_openat: {
+            map_fd_param0(regs, is_invalid, fixup_method, replace_value, deferred, [&](std::shared_ptr<FileDescription>& desc) {
+                if(auto maybe_path = read_c_string(regs.rsi, 65536)) {
+                    std::string path = std::move(maybe_path.value());
+                    deferred.push_back([this, dirfd(std::move(desc)), path(std::move(path))](user_regs_struct& regs) {
+                        return register_returned_fd_after_syscall(regs, dirfd->path, path);
+                    });
+                } else {
+                    is_invalid = true;
+                    fixup_method = SyscallFixupMethod::SET_VALUE;
+                    replace_value = -EFAULT;
+                }
+            });
+            break;
+        }
+        case __NR_readlinkat: {
+            map_fd_param0(regs, is_invalid, fixup_method, replace_value, deferred);
+            break;
+        }
+        case __NR_open: {
+            if(process->sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
+            if(auto maybe_path = read_c_string(regs.rdi, 65536)) {
+                std::string path = std::move(maybe_path.value());
+                deferred.push_back([this, path(std::move(path))](user_regs_struct& regs) {
+                    return register_returned_fd_after_syscall(regs, {}, path);
+                });
+            } else {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EFAULT;
+            }
+            break;
+        }
+
+        case CK_SYS_GET_ABI_VERSION: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = CK_ABI_VERSION;
+            break;
+        }
+        case CK_SYS_NOTIFY_INVALID_SYSCALL: {
+            process->notify_invalid_syscall.store(true);
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            break;
+        }
+        case CK_SYS_CREATE_USER_FD: {
+            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
+            desc->ty = FileInstanceType::USER;
+            int vfd = process->io_map.insert_file_description(std::move(desc));
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = vfd;
+            break;
+        }
+        case CK_SYS_ENABLE_FDMAP: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = -EINVAL;
+
+            if(process->sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
+            process->sandbox_state.store(SandboxState::IN_SANDBOX);
+            replace_value = 0;
+            break;
+        }
+        case CK_SYS_ATTACH_VFD: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = -EINVAL;
+
+            if(process->sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
+                break;
+            }
+
+            int vfd = regs.rdi;
+            int os_fd = regs.rsi;
+            auto ty = (FileInstanceType) (uint32_t) regs.rdx;
+            unsigned long path_remote = regs.rcx;
+
+            std::string path;
+            if(path_remote) {
+                if(auto maybe_path = read_c_string(path_remote, 65536)) {
+                    path = std::move(maybe_path.value());
+                } else {
+                    break;
+                }
+            }
+            
+            bool ty_ok = false;
+            switch(ty) {
+                case FileInstanceType::IDMAP:
+                case FileInstanceType::HYPERVISOR:
+                case FileInstanceType::NORMAL:
+                case FileInstanceType::USER:
+                    ty_ok = true;
+                    break;
+
+                default:
+                    printf("Unknown type: %u\n", (uint32_t) ty);
+                    break;
+            }
+
+            if(!ty_ok) break;
+
+            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
+            desc->ty = ty;
+            desc->path = path;
+            desc->os_fd = os_fd;
+            process->io_map.insert_file_description(vfd, std::move(desc));
+            replace_value = 0;
+
+            printf("Attached os_fd %d to vfd %d\n", os_fd, vfd);
+            break;
+        }
+        case CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER: {
+            user_regs_struct new_regs;
+            if(!process->read_memory(regs.rdi, sizeof(new_regs), (uint8_t *) &new_regs)) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EINVAL;
+                break;
+            }
+            new_regs.rax = 0;
+
+            regs.orig_rax = __NR_munmap;
+            regs.rdi = 0x70000000;
+            regs.rsi = 0x10000000;
+            ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+
+            deferred.push_back([this, new_regs](user_regs_struct& regs) {
+                // FIXME: Will all registers always be set to the provided value successfully?
+                ptrace(PTRACE_SETREGS, os_tid, 0, &new_regs);
+                ptrace(PTRACE_GETREGS, os_tid, 0, &regs);
+                return false;
+            });
+            break;
+        }
+        case CK_SYS_SNAPSHOT_ME: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = -EINVAL;
+
+            auto snapshot = this->process->take_snapshot();
+            if(!snapshot) {
+                break;
+            }
+
+            {
+                std::lock_guard<std::mutex> lg(this->process->last_snapshot_mu);
+                this->process->last_snapshot = std::move(snapshot);
+            }
+            replace_value = 1;
+            break;
+        }
+        case CK_SYS_GETPID: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+
+            __uint128_t pid = process->ck_pid;
+            if(process->write_memory(regs.rdi, 16, (uint8_t *) &pid)) replace_value = 0;
+            else replace_value = -EFAULT;
+            break;
+        }
+        case CK_SYS_DEBUG_PRINT_REGS: {
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            replace_value = 0;
+            print_regs(regs);
+            break;
+        }
+        default:
+            if(permissive_mode) {
+                auto ck_pid_s = stringify_ck_pid(this->process->ck_pid);
+                printf("Warning (permissive mode): Process %d/%d/%s invoked an unknown syscall: %lu\n", this->process->os_pid, this->os_tid, ck_pid_s.c_str(), nr);
+            } else {
+                is_invalid = true;
+                if(process->notify_invalid_syscall.load()) {
+                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+                } else {
+                    printf("Invalid syscall: %lu\n", nr);
+                    fixup_method = SyscallFixupMethod::SET_VALUE;
+                    replace_value = -EPERM;
+                }
+            }
+            break;
+    }
+
+    if(is_invalid) {
+        regs.orig_rax = __NR_getpid;
+        ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+    }
+
+    ptrace(PTRACE_SYSCALL, os_tid, 0, 0);
+    int wstatus = 0;
+    if(waitpid(os_tid, &wstatus, 0) < 0) return TraceContinuationState::BREAK;
+
+    int stopsig = WSTOPSIG(wstatus);
+    if(WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
+        return TraceContinuationState::BREAK;
+    }
+
+    stopsig = WSTOPSIG(wstatus);
+    ptrace(PTRACE_GETREGS, os_tid, 0, &regs);
+    
+    if(!is_invalid) {
+        for(auto it = deferred.rbegin(); it != deferred.rend(); it++) {
+            is_invalid = (*it)(regs);
+            if(is_invalid) {
+                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+                break;
+            }
+        }
+    }
+
+    if((wstatus >> 8) == (SIGTRAP | (PTRACE_EVENT_CLONE<<8))) {
+        return handle_new_thread();
+    }
+
+    if(stopsig == (SIGTRAP | 0x80)) {
+        if(is_invalid) {
+            switch(fixup_method) {
+                case SyscallFixupMethod::SET_VALUE: {
+                    regs.rax = replace_value;
+                    ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+                    break;
+                }
+                case SyscallFixupMethod::SEND_SIGSYS: {
+                    regs.rax = nr;
+                    ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+                    tgkill(this->process->os_pid, this->os_tid, SIGSYS);
+                    break;
+                }
+                default: assert(false);
+            }
+        }
+    } else {
+        stopsig_out = stopsig;
+    }
+
+    return TraceContinuationState::CONTINUE;
+}
+
+std::shared_ptr<FileDescription> Thread::map_fd_param0(
+    user_regs_struct& regs,
+    bool& is_invalid,
+    SyscallFixupMethod& fixup_method,
+    int64_t& replace_value,
+    std::vector<DeferredSyscallHandler>& deferred,
+    std::function<void(std::shared_ptr<FileDescription>&)> preprocess
+) {
+    if(process->sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
+        return nullptr;
+    }
+    auto desc = process->io_map.get_file_description(regs.rdi);
+    if(!desc) {
+        fixup_method = SyscallFixupMethod::SET_VALUE;
+        replace_value = -EBADF;
+        is_invalid = true;
+        return nullptr;
+    }
+    if(desc->ty == FileInstanceType::USER) {
+        fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+        is_invalid = true;
+    } else {
+        if(preprocess) preprocess(desc);
+        if(!is_invalid) {
+            int64_t orig_fd = regs.rdi;
+            regs.rdi = desc->os_fd;
+            ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+            deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
+                regs.rdi = orig_fd;
+                ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+                return false;
+            });
+        }
+    }
+    return desc;
+}
+
+TraceContinuationState Thread::handle_signal(user_regs_struct regs, int& sig) {
+    if(sig == SIGTRAP && this->process->sandbox_state.load() == SandboxState::IN_EXEC) {
+        sig = 0;
+        this->process->sandbox_state.store(SandboxState::IN_SANDBOX);
+    }
+    return TraceContinuationState::CONTINUE;
+}
+
+TraceContinuationState Thread::handle_new_thread() {
+    unsigned long new_tid = 0;
+    if(ptrace(PTRACE_GETEVENTMSG, os_tid, 0, &new_tid) < 0) {
+        printf("Unable to get message for CLONE event\n");
+        return TraceContinuationState::BREAK;
+    }
+    assert(new_tid > 0);
+    assert(waitpid(new_tid, nullptr, 0) >= 0);
+    if(ptrace(PTRACE_DETACH, new_tid, 0, SIGSTOP) < 0) {
+        printf("Unable to detach from the new thread\n");
+        return TraceContinuationState::BREAK;
+    }
+
+    std::promise<void> creation_done;
+    std::future<void> creation_done_fut = creation_done.get_future();
+    std::thread([process(this->process), &creation_done, new_tid]() {
+        if(ptrace(PTRACE_ATTACH, new_tid, 0, 0) < 0) {
+            try {
+                throw std::runtime_error("unable to attach to the new thread");
+            } catch(...) {
+                creation_done.set_exception(std::current_exception());
+            }
+            return;
+        }
+        auto th = Thread::from_os_thread(process, new_tid);
+        Thread *th_ref = &*th;
+
+        {
+            std::lock_guard<std::mutex> lg(process->threads_mu);
+            process->threads[th->os_tid] = std::move(th);
+        }
+
+        creation_done.set_value();
+        th_ref->run();
+    }).detach();
+
+    try {
+        creation_done_fut.get();
+    } catch(std::runtime_error& e) {
+        printf("Thread creation failed: %s\n", e.what());
+    }
+    return TraceContinuationState::CONTINUE;
 }
 
 ProcessSet::ProcessSet() : pid_rand_gen(pid_rand_dev()) {

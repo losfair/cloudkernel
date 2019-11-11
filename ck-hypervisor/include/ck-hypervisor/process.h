@@ -26,7 +26,6 @@ using ck_pid_t = __uint128_t;
 
 enum class TraceContinuationState {
     CONTINUE,
-    CLEANUP,
     BREAK,
 };
 
@@ -37,30 +36,68 @@ enum class SandboxState {
     IN_SANDBOX,
 };
 
+enum class SyscallFixupMethod {
+    SET_VALUE,
+    SEND_SIGSYS,
+};
+
 using DeferredSyscallHandler = std::function<bool(user_regs_struct&)>;
+
+class Process;
+
+class Thread {
+    private:
+    Process *process = nullptr;
+    int os_tid = -1;
+
+    Thread() {}
+    void run_ptrace_monitor();
+    bool register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path);
+    TraceContinuationState handle_syscall(user_regs_struct regs, int& sig);
+    TraceContinuationState handle_signal(user_regs_struct regs, int& sig);
+    TraceContinuationState handle_new_thread();
+    std::optional<std::string> read_c_string(unsigned long remote_addr, size_t max_size);
+    std::shared_ptr<FileDescription> map_fd_param0(
+        user_regs_struct& regs,
+        bool& is_invalid,
+        SyscallFixupMethod& fixup_method,
+        int64_t& replace_value,
+        std::vector<DeferredSyscallHandler>& deferred,
+        std::function<void(std::shared_ptr<FileDescription>&)> preprocess = nullptr
+    );
+
+    public:
+    Thread(const Thread& that) = delete;
+    Thread(Thread&& that) = delete;
+    virtual ~Thread();
+
+    static std::unique_ptr<Thread> from_os_thread(Process *process, int os_tid);
+    static std::unique_ptr<Thread> first_thread(Process *process);
+
+    void run();
+
+    friend class Process;
+};
 
 class Process {
     private:
     int os_pid;
     int socket;
     std::thread socket_listener;
-    std::thread ptrace_monitor;
     std::vector<std::function<void()>> awaiters;
     std::mutex awaiters_mu;
     BQueue<OwnedMessage> pending_messages;
-    std::atomic<bool> kill_requested = std::atomic<bool>(false);
     std::atomic<SandboxState> sandbox_state = std::atomic<SandboxState>(SandboxState::NONE);
     IOMap io_map;
     std::atomic<bool> notify_invalid_syscall = std::atomic<bool>(false);
     std::string image_type;
     std::mutex last_snapshot_mu;
     std::shared_ptr<std::vector<uint8_t>> last_snapshot;
+    std::mutex threads_mu;
+    std::map<int, std::unique_ptr<Thread>> threads;
 
     void serve_sandbox();
     void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem);
-    void run_ptrace_monitor();
-    TraceContinuationState handle_syscall(user_regs_struct regs, int& sig);
-    TraceContinuationState handle_signal(user_regs_struct regs, int& sig);
     void run_as_child(int socket);
     bool read_memory(unsigned long remote_addr, size_t len, uint8_t *data);
     template<class T> std::optional<T> read_memory_typed(unsigned long remote_addr) {
@@ -74,8 +111,6 @@ class Process {
         static_assert(std::is_trivial<T>::value, "write_memory_typed only accepts trivial types");
         return write_memory(remote_addr, sizeof(T), (const uint8_t *) &data);
     }
-    std::optional<std::string> read_c_string(unsigned long remote_addr, size_t max_size);
-    bool register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path);
     std::shared_ptr<std::vector<uint8_t>> take_snapshot();
 
     public:
@@ -95,6 +130,8 @@ class Process {
         auto ret = last_snapshot;
         return ret;
     }
+
+    friend class Thread;
 };
 
 class ProcessSet {
