@@ -56,10 +56,14 @@ static int send_reject(int socket, const char *reason) {
 
 void Process::run_as_child(int socket) {
     personality(ADDR_NO_RANDOMIZE); // snapshoting requires deterministic address space layout
-
-    std::stringstream ss;
-    ss << "CK_HYPERVISOR_FD=" << socket;
-    auto socket_id_env_str = ss.str();
+    if(socket != 3) {
+        if(dup2(socket, 3) < 0) {
+            printf("cannot duplicate socket fd\n");
+            exit(1);
+        }
+        close(socket);
+        socket = 3;
+    }
 
     int flags = fcntl(socket, F_GETFD, 0);
     flags &= ~FD_CLOEXEC;
@@ -75,12 +79,6 @@ void Process::run_as_child(int socket) {
     }
     args_exec.push_back(nullptr);
 
-    std::vector<char *> envp_exec;
-    if(privileged) envp_exec.push_back((char *) "CK_PRIVILEGED=1");
-    else envp_exec.push_back((char *) "CK_PRIVILEGED=0");
-    envp_exec.push_back((char *) socket_id_env_str.c_str());
-    envp_exec.push_back(nullptr);
-
     if(setgid(65534) != 0 || setuid(65534) != 0) {
         printf("unable to drop permissions\n");
         if(getuid() == 0) {
@@ -88,7 +86,7 @@ void Process::run_as_child(int socket) {
             exit(1);
         }
     }
-    execve("./ck-hypervisor-sandbox", &args_exec[0], &envp_exec[0]);
+    execv("./ck-hypervisor-sandbox", &args_exec[0]);
 }
 
 Process::Process(const std::vector<std::string>& new_args) {
@@ -728,16 +726,11 @@ void Thread::run_ptrace_monitor() {
     }
 }
 
-bool Thread::register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path) {
+bool Thread::register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path, int flags) {
     if(regs.rax >= 0) {
-        auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-        desc->os_fd = regs.rax;
-        desc->path = parent_path;
-        desc->path += path;
-        desc->ty = FileInstanceType::NORMAL;
-        int vfd = process->io_map.insert_file_description(std::move(desc));
-        regs.rax = vfd;
-        ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
+        auto full_path = parent_path;
+        full_path += path;
+        process->insert_fd(regs.rax, false, full_path, flags);
     }
 
     return false; // is_invalid = false
@@ -756,16 +749,8 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
             process->sandbox_state.store(SandboxState::IN_EXEC);
             break;
         }
-        case CK_SYS_SET_REMOTE_HYPERVISOR_FD: {
-            int remote_fd = regs.rdi;
-            int vfd = process->io_map.insert_file_description(FileDescription::with_hypervisor_fd(remote_fd));
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = 0;
-            break;
-        }
-        case CK_SYS_ENTER_SANDBOX_NO_FDMAP: {
-            process->sandbox_state.store(SandboxState::IN_SANDBOX_NO_FDMAP);
+        case CK_SYS_ENTER_SANDBOX: {
+            process->sandbox_state.store(SandboxState::IN_SANDBOX);
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
             replace_value = 0;
@@ -773,53 +758,6 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
         }
         default: break;
     } else switch(nr) {
-        // IO
-        case __NR_lseek:
-        case __NR_write:
-        case __NR_read:
-        case __NR_sendto:
-        case __NR_recvfrom:
-        case __NR_sendmsg:
-        case __NR_recvmsg:
-        case __NR_fstat:
-        case __NR_fcntl:
-        {
-            map_fd_param0(regs, is_invalid, fixup_method, replace_value, deferred);
-            break;
-        }
-        case __NR_close:
-        {
-            if(process->sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-            int64_t orig_fd = regs.rdi;
-            if(auto desc = process->io_map.get_file_description(orig_fd)) {
-                if(desc->ty == FileInstanceType::USER) {
-                    is_invalid = true;
-                    fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-
-                    // `deferred` won't be executed if is_invalid == true.
-                    process->io_map.remove_file_description(orig_fd);
-                } else {
-                    regs.rdi = desc->os_fd;
-                    ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
-                    deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
-                        if(regs.rax == 0) {
-                            process->io_map.remove_file_description(orig_fd);
-                        }
-                        regs.rdi = orig_fd;
-                        ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
-                        return false;
-                    });
-                }
-            } else {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EBADF;
-            }
-            break;
-        }
-
         // memory
         case __NR_brk:
         case __NR_mmap:
@@ -856,10 +794,54 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
 
         // random
         case __NR_getrandom:
+
+        // file I/O
+        case __NR_lseek:
+        case __NR_write:
+        case __NR_read:
+        case __NR_sendto:
+        case __NR_recvfrom:
+        case __NR_sendmsg:
+        case __NR_recvmsg:
+        case __NR_fstat:
+        case __NR_fcntl:
+        case __NR_readlink:
+        case __NR_readlinkat:
             break;
 
-        case __NR_readlink:
+        case __NR_dup3:
+        case __NR_dup2:
+        case __NR_dup: {
+            auto desc = process->io_map.get_file_description(regs.rdi);
+            if(!desc) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EINVAL;
+                break;
+            }
+            bool user = desc->user;
+            auto path = desc->path;
+            int flags = desc->flags;
+            if(nr == __NR_dup3) flags |= (int) regs.rdx;
+            deferred.push_back([this, user, path(std::move(path)), flags](user_regs_struct& regs) {
+                if(regs.rax >= 0) {
+                    process->insert_fd(regs.rax, user, path, flags);
+                }
+                return false;
+            });
             break;
+        }
+
+        case __NR_close: {
+            int fd = regs.rdi;
+            deferred.push_back([this, fd](user_regs_struct& regs) {
+                if(regs.rax == 0) {
+                    process->io_map.remove_file_description(fd);
+                }
+                return false;
+            });
+            break;
+        }
 
         // Only allow `clone` to create threads, but not full processes.
         case __NR_clone: {
@@ -883,32 +865,31 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
         }
 
         case __NR_openat: {
-            map_fd_param0(regs, is_invalid, fixup_method, replace_value, deferred, [&](std::shared_ptr<FileDescription>& desc) {
+            if(auto desc = process->io_map.get_file_description(regs.rdi)) {
                 if(auto maybe_path = read_c_string(regs.rsi, 65536)) {
                     std::string path = std::move(maybe_path.value());
-                    deferred.push_back([this, dirfd(std::move(desc)), path(std::move(path))](user_regs_struct& regs) {
-                        return register_returned_fd_after_syscall(regs, dirfd->path, path);
+                    int flags = regs.rdx;
+                    deferred.push_back([this, dirfd(std::move(desc)), path(std::move(path)), flags](user_regs_struct& regs) {
+                        return register_returned_fd_after_syscall(regs, dirfd->path, path, flags);
                     });
                 } else {
                     is_invalid = true;
                     fixup_method = SyscallFixupMethod::SET_VALUE;
                     replace_value = -EFAULT;
                 }
-            });
-            break;
-        }
-        case __NR_readlinkat: {
-            map_fd_param0(regs, is_invalid, fixup_method, replace_value, deferred);
+            } else {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EINVAL;
+            }
             break;
         }
         case __NR_open: {
-            if(process->sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
             if(auto maybe_path = read_c_string(regs.rdi, 65536)) {
                 std::string path = std::move(maybe_path.value());
-                deferred.push_back([this, path(std::move(path))](user_regs_struct& regs) {
-                    return register_returned_fd_after_syscall(regs, {}, path);
+                int flags = regs.rsi;
+                deferred.push_back([this, path(std::move(path)), flags](user_regs_struct& regs) {
+                    return register_returned_fd_after_syscall(regs, {}, path, flags);
                 });
             } else {
                 is_invalid = true;
@@ -931,74 +912,20 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
             replace_value = 0;
             break;
         }
-        case CK_SYS_CREATE_USER_FD: {
-            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-            desc->ty = FileInstanceType::USER;
-            int vfd = process->io_map.insert_file_description(std::move(desc));
+        case CK_SYS_MARK_FD_AS_USER: {
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = vfd;
-            break;
-        }
-        case CK_SYS_ENABLE_FDMAP: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = -EINVAL;
 
-            if(process->sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
-            }
-            process->sandbox_state.store(SandboxState::IN_SANDBOX);
-            replace_value = 0;
-            break;
-        }
-        case CK_SYS_ATTACH_VFD: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = -EINVAL;
-
-            if(process->sandbox_state.load() != SandboxState::IN_SANDBOX_NO_FDMAP) {
-                break;
+            auto desc_p = process->io_map.get_file_description(regs.rdi);
+            if(!desc_p) {
+                replace_value = -EINVAL;
+            } else {
+                FileDescription desc = *desc_p;
+                desc.user = true;
+                process->io_map.insert_file_description(regs.rdi, std::shared_ptr<FileDescription>(new FileDescription(std::move(desc))));
+                replace_value = 0;
             }
 
-            int vfd = regs.rdi;
-            int os_fd = regs.rsi;
-            auto ty = (FileInstanceType) (uint32_t) regs.rdx;
-            unsigned long path_remote = regs.rcx;
-
-            std::string path;
-            if(path_remote) {
-                if(auto maybe_path = read_c_string(path_remote, 65536)) {
-                    path = std::move(maybe_path.value());
-                } else {
-                    break;
-                }
-            }
-            
-            bool ty_ok = false;
-            switch(ty) {
-                case FileInstanceType::IDMAP:
-                case FileInstanceType::HYPERVISOR:
-                case FileInstanceType::NORMAL:
-                case FileInstanceType::USER:
-                    ty_ok = true;
-                    break;
-
-                default:
-                    printf("Unknown type: %u\n", (uint32_t) ty);
-                    break;
-            }
-
-            if(!ty_ok) break;
-
-            auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-            desc->ty = ty;
-            desc->path = path;
-            desc->os_fd = os_fd;
-            process->io_map.insert_file_description(vfd, std::move(desc));
-            replace_value = 0;
-
-            printf("Attached os_fd %d to vfd %d\n", os_fd, vfd);
             break;
         }
         case CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER: {
@@ -1129,43 +1056,6 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
     return TraceContinuationState::CONTINUE;
 }
 
-std::shared_ptr<FileDescription> Thread::map_fd_param0(
-    user_regs_struct& regs,
-    bool& is_invalid,
-    SyscallFixupMethod& fixup_method,
-    int64_t& replace_value,
-    std::vector<DeferredSyscallHandler>& deferred,
-    std::function<void(std::shared_ptr<FileDescription>&)> preprocess
-) {
-    if(process->sandbox_state.load() == SandboxState::IN_SANDBOX_NO_FDMAP) {
-        return nullptr;
-    }
-    auto desc = process->io_map.get_file_description(regs.rdi);
-    if(!desc) {
-        fixup_method = SyscallFixupMethod::SET_VALUE;
-        replace_value = -EBADF;
-        is_invalid = true;
-        return nullptr;
-    }
-    if(desc->ty == FileInstanceType::USER) {
-        fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-        is_invalid = true;
-    } else {
-        if(preprocess) preprocess(desc);
-        if(!is_invalid) {
-            int64_t orig_fd = regs.rdi;
-            regs.rdi = desc->os_fd;
-            ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
-            deferred.push_back([this, orig_fd](user_regs_struct& regs) -> bool {
-                regs.rdi = orig_fd;
-                ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
-                return false;
-            });
-        }
-    }
-    return desc;
-}
-
 TraceContinuationState Thread::handle_signal(user_regs_struct regs, int& sig) {
     if(sig == SIGTRAP && this->process->sandbox_state.load() == SandboxState::IN_EXEC) {
         sig = 0;
@@ -1216,6 +1106,14 @@ TraceContinuationState Thread::handle_new_thread() {
         printf("Thread creation failed: %s\n", e.what());
     }
     return TraceContinuationState::CONTINUE;
+}
+
+void Process::insert_fd(int fd, bool user, const std::filesystem::path& path, int flags) {
+    auto desc = std::shared_ptr<FileDescription>(new FileDescription);
+    desc->user = user;
+    desc->path = path;
+    desc->flags = flags;
+    io_map.insert_file_description(fd, std::move(desc));
 }
 
 ProcessSet::ProcessSet() : pid_rand_gen(pid_rand_dev()) {

@@ -14,14 +14,6 @@
 #define _QUOTE(x) #x
 #define _STR(x) _QUOTE(x)
 
-static long __attribute__((naked)) attach_vfd(int vfd, int os_fd, FileInstanceType ty, const char *path) {
-    asm(
-        "movq $" _STR(CK_SYS_ATTACH_VFD) ", %rax\n"
-        "syscall\n"
-        "ret\n"
-    );
-}
-
 static long __attribute__((naked)) enable_notify_invalid_syscall() {
     asm(
         "movq $" _STR(CK_SYS_NOTIFY_INVALID_SYSCALL) ", %rax\n"
@@ -76,33 +68,20 @@ void __attribute__((noinline)) load_snapshot(int mfd, const uint8_t *snapshot, s
         auto path_len = read_vec<uint32_t>(snapshot, len, pos);
         std::string path; read_vec_n(snapshot, len, pos, path, path_len);
         auto offset = read_vec<uint64_t>(snapshot, len, pos);
-        auto ty = (FileInstanceType) read_vec<uint32_t>(snapshot, len, pos);
+        auto user = (bool) read_vec<uint32_t>(snapshot, len, pos);
         auto flags = read_vec<int32_t>(snapshot, len, pos);
 
-        switch(ty) {
-            case FileInstanceType::IDMAP: break;
-            case FileInstanceType::HYPERVISOR: break;
-            case FileInstanceType::NORMAL: {
-                int fd = open(path.c_str(), flags);
-                if(fd < 0) {
-                    printf("Warning: Unable to open file %s: %s\n", path.c_str(), strerror(errno));
-                    break;
-                }
-                lseek(fd, offset, SEEK_SET);
-                if(int err = attach_vfd(vfd, fd, ty, path.c_str()); err != 0) {
-                    printf("Warning: Unable to attach vfd %d (os: %d) for path %s: %s\n", vfd, fd, path.c_str(), strerror(-err));
-                    break;
-                }
-                break;
+        int fd = open(path.c_str(), flags);
+        if(fd < 0) {
+            printf("Warning: Unable to open file %s: %s\n", path.c_str(), strerror(errno));
+            continue;
+        }
+        lseek(fd, offset, SEEK_SET);
+        if(vfd != fd) {
+            if(dup2(fd, vfd) < 0) {
+                printf("Warning: Unable to duplicate fd\n");
             }
-            case FileInstanceType::USER: {
-                if(int err = attach_vfd(vfd, -1, ty, nullptr); err != 0) {
-                    printf("Warning: Unable to attach user vfd %d: %s\n", vfd, strerror(-err));
-                    break;
-                }
-                break;
-            }
-            default: throw std::runtime_error("unknown file type");
+            close(fd);
         }
     }
 

@@ -19,10 +19,10 @@ class MemoryRangeSnapshot {
 
 class FileSnapshot {
     public:
-    int vfd = -1;
+    int fd = -1;
     std::string path;
     uint64_t offset = 0;
-    FileInstanceType ty = FileInstanceType::INVALID;
+    bool user = false;
     int flags = 0;
 };
 

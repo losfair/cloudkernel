@@ -32,7 +32,6 @@ enum class TraceContinuationState {
 enum class SandboxState {
     NONE,
     IN_EXEC,
-    IN_SANDBOX_NO_FDMAP,
     IN_SANDBOX,
 };
 
@@ -52,7 +51,7 @@ class Thread {
 
     Thread() {}
     void run_ptrace_monitor();
-    bool register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path);
+    bool register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path, int flags);
     TraceContinuationState handle_syscall(user_regs_struct regs, int& sig);
     TraceContinuationState handle_signal(user_regs_struct regs, int& sig);
     TraceContinuationState handle_new_thread();
@@ -112,6 +111,7 @@ class Process {
         return write_memory(remote_addr, sizeof(T), (const uint8_t *) &data);
     }
     std::shared_ptr<std::vector<uint8_t>> take_snapshot();
+    void insert_fd(int fd, bool user, const std::filesystem::path& path, int flags);
 
     public:
     std::vector<std::string> args;

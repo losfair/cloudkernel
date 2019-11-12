@@ -51,17 +51,9 @@ static long __attribute__((naked)) report_hypervisor_fd(int fd) {
     );
 }
 
-static long __attribute__((naked)) enter_sandbox_no_fdmap() {
+static long __attribute__((naked)) enter_sandbox() {
     asm(
-        "movq $" _STR(CK_SYS_ENTER_SANDBOX_NO_FDMAP) ", %rax\n"
-        "syscall\n"
-        "ret\n"
-    );
-}
-
-static long __attribute__((naked)) enable_fdmap() {
-    asm(
-        "movq $" _STR(CK_SYS_ENABLE_FDMAP) ", %rax\n"
+        "movq $" _STR(CK_SYS_ENTER_SANDBOX) ", %rax\n"
         "syscall\n"
         "ret\n"
     );
@@ -93,7 +85,6 @@ struct SnapshotInvocationContext {
 void invoke_snapshot(SnapshotInvocationContext *ctx) {
     user_regs_struct regs;
     load_snapshot(ctx->mfd, (const uint8_t *) ctx->image_mapping, ctx->image_size, regs); // `ctx` becomes invalid after this
-    enable_fdmap();
     load_processor_state_and_unmap_loader(&regs);
 }
 
@@ -138,7 +129,7 @@ struct SharedModule {
             std::cout << "execv() failed" << std::endl;
             abort();
         } else if(module_type == "snapshot") {
-            enter_sandbox_no_fdmap();
+            enter_sandbox();
             SnapshotInvocationContext ctx = {
                 .mfd = mfd,
                 .image_mapping = image_mapping,
@@ -251,12 +242,5 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
 
 int main(int argc, const char *argv[]) {
     if(argc < 2) abort();
-
-    const char *hypervisor_fd_s = getenv("CK_HYPERVISOR_FD");
-
-    if(!hypervisor_fd_s) abort();
-
-    int hypervisor_fd = atoi(hypervisor_fd_s);
-
-    return sandbox_run(hypervisor_fd, argc - 1, &argv[1]);
+    return sandbox_run(3, argc - 1, &argv[1]);
 }
