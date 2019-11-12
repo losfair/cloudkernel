@@ -676,10 +676,10 @@ void Thread::run_ptrace_monitor() {
         return;
     }
 
-    {
+    /*{
         auto ck_pid_s = stringify_ck_pid(process->ck_pid);
         printf("Monitor initialized on thread %d/%s\n", os_tid, ck_pid_s.c_str());
-    }
+    }*/
 
     int stopsig = 0;
 
@@ -720,10 +720,10 @@ void Thread::run_ptrace_monitor() {
 
     out:;
 
-    {
+    /*{
         auto ck_pid_s = stringify_ck_pid(process->ck_pid);
         printf("Monitor exited on thread %d/%s\n", os_tid, ck_pid_s.c_str());
-    }
+    }*/
 }
 
 bool Thread::register_returned_fd_after_syscall(user_regs_struct& regs, const std::filesystem::path& parent_path, const std::string& path, int flags) {
@@ -794,6 +794,8 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
 
         // random
         case __NR_getrandom:
+        case __NR_readlink:
+            break;
 
         // file I/O
         case __NR_lseek:
@@ -805,9 +807,23 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
         case __NR_recvmsg:
         case __NR_fstat:
         case __NR_fcntl:
-        case __NR_readlink:
-        case __NR_readlinkat:
+        case __NR_readlinkat: {
+            if(regs.rdi <= 3 || regs.rdi == AT_FDCWD) break;
+
+            auto desc = process->io_map.get_file_description(regs.rdi);
+            if(!desc) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SET_VALUE;
+                replace_value = -EINVAL;
+                break;
+            }
+            if(desc->user) {
+                is_invalid = true;
+                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
+                break;
+            }
             break;
+        }
 
         case __NR_dup3:
         case __NR_dup2:
