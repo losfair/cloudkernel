@@ -3,6 +3,7 @@
 #include <ck-hypervisor/registry.h>
 #include <memory>
 #include <functional>
+#include <string>
 #include <sys/types.h>
 
 #define __round_mask(x, y) ((__typeof__(x))((y) - 1))
@@ -10,17 +11,15 @@
 
 class DynamicModule {
     private:
-    void init(std::function<void(uint8_t *)> feed, size_t len);
+    std::unique_ptr<ModuleHandle> module_handle;
 
     public:
-    int mfd = -1;
+    int fd = -1;
     size_t module_size = 0;
+    std::string module_type;
 
     DynamicModule(const char *name, VersionCode version);
-    DynamicModule(std::function<void(uint8_t *)> feed, size_t len);
     DynamicModule(const DynamicModule& that) = delete;
     DynamicModule(DynamicModule&& that) = delete;
     virtual ~DynamicModule();
-
-    static std::shared_ptr<DynamicModule> load_cached(const char *name, VersionCode version, std::function<DynamicModule *()> feed);
 };

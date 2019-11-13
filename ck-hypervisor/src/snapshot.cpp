@@ -10,7 +10,10 @@ std::vector<uint8_t> ProcessSnapshot::serialize() const {
     std::vector<uint8_t> result;
 
     write_vec(result, (uint8_t) notify_invalid_syscall);
-    write_vec(result, regs);
+    write_vec(result, (uint32_t) thread_regs.size());
+    for(auto& regs : thread_regs) {
+        write_vec(result, regs);
+    }    
 
     std::vector<size_t> memory_ptr_offsets;
     write_vec(result, (uint32_t) memory.size());

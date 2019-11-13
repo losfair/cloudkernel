@@ -15,81 +15,12 @@
 #include <stdio.h>
 
 DynamicModule::DynamicModule(const char *name, VersionCode version) {
-    auto handle = global_registry.get_module(name, version);
-    size_t body_size = handle->get_file_size();
-
-    init([&](uint8_t *out) {
-        if(handle->read(out, body_size) != body_size) {
-            throw std::runtime_error("unable to read module from file");
-        }
-    }, body_size);
-}
-
-DynamicModule::DynamicModule(std::function<void(uint8_t *)> feed, size_t len) {
-    init(std::move(feed), len);
-}
-
-void DynamicModule::init(std::function<void(uint8_t *)> feed, size_t len) {
-    module_size = round_up(len, getpagesize());
-
-    mfd = memfd_create("dynamic-module", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if(mfd < 0) throw std::runtime_error("unable to create shared memory");
-
-    if(ftruncate(mfd, module_size) < 0) {
-        close(mfd);
-        throw std::runtime_error("unable to set size for shared memory");
-    }
-    uint8_t *mapped = (uint8_t *) mmap(nullptr, module_size, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
-    if(!mapped) {
-        close(mfd);
-        throw std::runtime_error("mmap on shared memory failed");
-    }
-    
-    try {
-        feed(mapped);
-    } catch(std::runtime_error& e) {
-        munmap(mapped, module_size);
-        close(mfd);
-        throw e;
-    }
-
-    if(munmap(mapped, module_size) < 0) {
-        printf("DynamicModule::init() failed to unmap: %s\n", strerror(errno));
-        throw std::runtime_error("unable to unmap");
-    }
-
-    // FIXME: Sometimes fcntl returns EBUSY and retrying after a delay fixes that. Why?
-    for(int i = 0; i < 5; i++) {
-        if(fcntl(mfd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_WRITE | F_SEAL_SEAL) < 0) {
-            printf("DynamicModule::init() failed to add seals, retrying (%d)\n", i);
-            usleep(10000);
-            continue;
-        }
-        goto seal_ok;
-    }
-    close(mfd);
-    throw std::runtime_error("unable to add seals");
-
-    seal_ok:;
+    module_handle = global_registry.get_module(name, version);
+    module_type = module_handle->module_type;
+    module_size = module_handle->get_file_size();
+    fd = module_handle->module_fd;
 }
 
 DynamicModule::~DynamicModule() {
-    close(mfd);
-}
-
-static std::map<std::pair<std::string, VersionCode>, std::shared_ptr<DynamicModule>> dm_cache;
-static std::mutex dm_cache_mu;
-
-std::shared_ptr<DynamicModule> DynamicModule::load_cached(const char *name, VersionCode version, std::function<DynamicModule *()> feed) {
-    std::lock_guard<std::mutex> lg(dm_cache_mu);
-
-    auto key = std::make_pair(std::string(name), version);
-    auto it = dm_cache.find(key);
-    if(it != dm_cache.end()) {
-        return it->second;
-    } else {
-        auto v = std::shared_ptr<DynamicModule>(feed());
-        dm_cache[key] = v;
-        return v;
-    }
+    // `fd` is closed by `module_handle` destructor
 }

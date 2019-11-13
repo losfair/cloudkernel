@@ -37,7 +37,7 @@ int main(int argc, const char *argv[]) {
     while(true) {
         usleep(50000); // 50ms
         global_process_set.tick();
-        if(global_process_set.get_process(ck_pid) == nullptr) break;
+        if(global_process_set.get_num_processes() == 0) break;
     }
 
     return 0;

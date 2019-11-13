@@ -13,6 +13,7 @@
 #include <optional>
 #include <unordered_set>
 #include <atomic>
+#include <future>
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
@@ -48,6 +49,8 @@ class Thread {
     private:
     Process *process = nullptr;
     int os_tid = -1;
+    std::unique_ptr<std::promise<user_regs_struct>> register_dump_request;
+    std::mutex register_dump_request_mu;
 
     Thread() {}
     void run_ptrace_monitor();
@@ -97,7 +100,6 @@ class Process {
 
     void serve_sandbox();
     void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem);
-    void run_as_child(int socket);
     bool read_memory(unsigned long remote_addr, size_t len, uint8_t *data);
     template<class T> std::optional<T> read_memory_typed(unsigned long remote_addr) {
         static_assert(std::is_trivial<T>::value, "read_memory_typed only accepts trivial types");
@@ -124,6 +126,7 @@ class Process {
     virtual ~Process();
 
     void run();
+    void run_as_child(int socket);
     void add_awaiter(std::function<void()>&& awaiter);
     std::shared_ptr<std::vector<uint8_t>> get_last_snapshot() {
         std::lock_guard<std::mutex> lg(last_snapshot_mu);
@@ -157,6 +160,7 @@ class ProcessSet {
     std::optional<ck_pid_t> get_service(const char *name);
     void notify_termination(ck_pid_t pid);
     void tick();
+    size_t get_num_processes();
 };
 
 extern ProcessSet global_process_set;

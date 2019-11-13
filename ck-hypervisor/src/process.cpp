@@ -31,6 +31,7 @@
 #include <sys/prctl.h>
 #include <ck-hypervisor/network.h>
 #include <sys/personality.h>
+#include <picosha2.h>
 
 static const bool permissive_mode = false;
 
@@ -143,6 +144,8 @@ static void print_regs(const user_regs_struct& regs) {
     printf("r14: %p\n", (void *) regs.r14);
     printf("r15: %p\n", (void *) regs.r15);
     printf("rip: %p\n", (void *) regs.rip);
+    printf("fs_base: %p\n", (void *) regs.fs_base);
+    printf("gs_base: %p\n", (void *) regs.gs_base);
 }
 
 bool Process::read_memory(unsigned long remote_addr, size_t len, uint8_t *data) {
@@ -315,7 +318,45 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
     ProcessSnapshot snapshot;
 
     snapshot.notify_invalid_syscall = this->notify_invalid_syscall.load();
-    ptrace(PTRACE_GETREGS, os_pid, 0, &snapshot.regs);
+
+    std::vector<std::future<std::optional<user_regs_struct>>> pending_regs;
+
+    {
+        std::lock_guard<std::mutex> lg(threads_mu);
+        for(auto& [os_tid, th] : threads) {
+            auto pending = std::unique_ptr<std::promise<std::optional<user_regs_struct>>>(new std::promise<std::optional<user_regs_struct>>);
+            pending_regs.push_back(pending->get_future());
+
+            auto pending_l2 = std::unique_ptr<std::promise<user_regs_struct>>(new std::promise<user_regs_struct>);
+            auto pending_l2_fut = std::unique_ptr<std::future<user_regs_struct>>(new std::future<user_regs_struct>(pending_l2->get_future()));
+
+            {
+                std::lock_guard<std::mutex> lg(th->register_dump_request_mu);
+                th->register_dump_request = std::move(pending_l2);
+            }
+
+            std::thread([pending_l2_fut(std::move(pending_l2_fut)), pending(std::move(pending))]() {
+                using namespace std::chrono_literals;
+                auto status = pending_l2_fut->wait_for(1s);
+                if(status == std::future_status::ready) {
+                    pending->set_value(pending_l2_fut->get());
+                } else {
+                    pending->set_value(std::nullopt);
+                }
+            }).detach();
+
+            tgkill(os_pid, os_tid, SIGTRAP);
+        }
+    }
+
+    for(auto& fut : pending_regs) {
+        if(auto maybe_regs = fut.get()) {
+            auto regs = maybe_regs.value();
+            snapshot.thread_regs.push_back(regs);
+        } else {
+            return {};
+        }
+    }
 
     if(auto ss = take_memory_snapshot(os_pid)) {
         snapshot.memory = std::move(ss.value());
@@ -353,53 +394,22 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
 
             std::shared_ptr<DynamicModule> dm;
             try {
-                static const std::string snapshot_prefix = "snapshot:";
-                if(auto [left, right] = std::mismatch(module_name.begin(), module_name.end(), snapshot_prefix.begin(), snapshot_prefix.end()); right == snapshot_prefix.end()) {
-                    std::string snapshot_pid;
-                    std::copy(left, module_name.end(), std::back_inserter(snapshot_pid));
-                    if(snapshot_pid.size() != 32) {
-                        throw std::runtime_error("bad snapshot pid size");
-                    }
-                    __uint128_t target = 0;
-                    {
-                        uint64_t *target_b = (uint64_t *) &target;
-                        if(sscanf(snapshot_pid.c_str(), "%016lx%016lx", &target_b[1], &target_b[0]) != 2) {
-                            throw std::runtime_error("invalid snapshot pid");
-                        }
-                    }
-                    auto remote_proc = global_process_set.get_process(target);
-                    if(!remote_proc) {
-                        throw std::runtime_error("remote process not found");
-                    }
-                    auto ss = remote_proc->get_last_snapshot();
-                    if(!ss) {
-                        throw std::runtime_error("no snapshot for the provided remote process");
-                    }
-                    dm = DynamicModule::load_cached(module_name.c_str(), VersionCode(), [&]() { return new DynamicModule([&](uint8_t *out) {
-                        std::copy(&(*ss)[0], &(*ss)[ss->size()], out);
-                    }, ss->size()); });
-                    module_type = "snapshot";
-                } else {
-                    dm = DynamicModule::load_cached(module_name.c_str(), version_code, [&]() {
-                        return new DynamicModule(module_name.c_str(), version_code);
-                    });
-                    module_type = "elf";
-                }
-                
+                dm = std::shared_ptr<DynamicModule>(new DynamicModule(module_name.c_str(), version_code));
+                module_type = dm->module_type;
             } catch(std::runtime_error& e) {
                 printf("Error while trying to get module '%s': %s\n", module_name.c_str(), e.what());
                 send_reject(socket, "missing/invalid module");
                 break;
             }
 
-            // We cannot pass the memfd back directly because we want syscalls like `lseek`
+            // We cannot pass the DynamicModule fd back directly because we want syscalls like `lseek`
             // to be independent.
             std::stringstream fd_handle_path_ss;
-            fd_handle_path_ss << "/proc/" << getpid() << "/fd/" << dm->mfd;
+            fd_handle_path_ss << "/proc/" << getpid() << "/fd/" << dm->fd;
             std::string fd_handle_path = fd_handle_path_ss.str();
-            int fd_handle = open(fd_handle_path.c_str(), O_RDONLY);
+            int fd_handle = open(fd_handle_path.c_str(), O_RDONLY | O_CLOEXEC);
             if(fd_handle < 0) {
-                send_reject(socket, "cannot open mfd");
+                send_reject(socket, "cannot open fd");
                 break;
             }
 
@@ -435,7 +445,12 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
 
             global_process_set.attach_process(new_proc);
             auto new_pid = new_proc->ck_pid;
-            new_proc->run();
+            try {
+                new_proc->run();
+            } catch(std::runtime_error& e) {
+                send_reject(socket, "cannot create process");
+                break;
+            }
 
             ProcessOffer offer;
             offer.api_version = APIVER_ProcessOffer;
@@ -557,6 +572,41 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             send_ok(socket);
             break;
         }
+        case MessageType::SNAPSHOT_CREATE: {
+            if(rem != sizeof(__uint128_t)) {
+                send_reject(socket, "invalid pid size");
+                break;
+            }
+
+            __uint128_t pid = * (__uint128_t *) data;
+            auto target_proc = global_process_set.get_process(pid);
+            if(!target_proc) {
+                send_reject(socket, "process not found");
+                break;
+            }
+
+            auto snapshot = target_proc->take_snapshot();
+            if(!snapshot) {
+                send_reject(socket, "unable to take snapshot");
+                break;
+            }
+
+            std::vector<uint8_t> snapshot_hash_bytes(picosha2::k_digest_size);
+            picosha2::hash256(snapshot->begin(), snapshot->end(), snapshot_hash_bytes.begin(), snapshot_hash_bytes.end());
+
+            std::string snapshot_name = "snapshot:";
+            snapshot_name += picosha2::bytes_to_hex_string(snapshot_hash_bytes.begin(), snapshot_hash_bytes.end());
+
+            try {
+                global_registry.save_module(snapshot_name.c_str(), std::nullopt, "snapshot", &(*snapshot)[0], snapshot->size());
+            } catch(std::runtime_error& e) {
+                send_reject(socket, "unable to save snapshot");
+                break;
+            }
+
+            send_ok(socket, snapshot_name.c_str());
+            break;
+        }
         default: break; // invalid tag
     }
 }
@@ -649,10 +699,13 @@ void Thread::run() {
     } catch(const std::runtime_error& e) {
         printf("ptrace monitor exited with error: %s\n", e.what());
     }
+    // The `erase` operation can make `this` invalid. We need to defer it to end of `run()`.
+    std::unique_ptr<Thread> pending_delete;
     {
         std::lock_guard<std::mutex> lg(process->threads_mu);
         if(auto it = process->threads.find(os_tid); it != process->threads.end()) {
             // This is the ONLY place where `process->threads.erase` is allowed to happen.
+            pending_delete = std::move(it->second);
             process->threads.erase(it);
         } else {
             throw std::logic_error("Thread id not found in process->threads");
@@ -952,8 +1005,6 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
                 replace_value = -EINVAL;
                 break;
             }
-            new_regs.rax = 0;
-
             regs.orig_rax = __NR_munmap;
             regs.rdi = 0x70000000;
             regs.rsi = 0x10000000;
@@ -965,23 +1016,6 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
                 ptrace(PTRACE_GETREGS, os_tid, 0, &regs);
                 return false;
             });
-            break;
-        }
-        case CK_SYS_SNAPSHOT_ME: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-            replace_value = -EINVAL;
-
-            auto snapshot = this->process->take_snapshot();
-            if(!snapshot) {
-                break;
-            }
-
-            {
-                std::lock_guard<std::mutex> lg(this->process->last_snapshot_mu);
-                this->process->last_snapshot = std::move(snapshot);
-            }
-            replace_value = 1;
             break;
         }
         case CK_SYS_GETPID: {
@@ -1076,6 +1110,16 @@ TraceContinuationState Thread::handle_signal(user_regs_struct regs, int& sig) {
     if(sig == SIGTRAP && this->process->sandbox_state.load() == SandboxState::IN_EXEC) {
         sig = 0;
         this->process->sandbox_state.store(SandboxState::IN_SANDBOX);
+    } else if(sig == SIGTRAP) {
+        std::unique_ptr<std::promise<user_regs_struct>> regs_request;
+        {
+            std::lock_guard<std::mutex> lg(register_dump_request_mu);
+            regs_request = std::move(register_dump_request);
+        }
+        if(regs_request) {
+            sig = 0;
+            regs_request->set_value(regs);
+        }
     }
     return TraceContinuationState::CONTINUE;
 }
@@ -1201,6 +1245,12 @@ void ProcessSet::tick() {
 
         pending_termination.clear();
     }
+}
+
+size_t ProcessSet::get_num_processes() {
+    std::lock_guard<std::mutex> lg(this->mu);
+    size_t ret = processes.size();
+    return ret;
 }
 
 ProcessSet global_process_set;

@@ -29,7 +29,7 @@ class FileSnapshot {
 class ProcessSnapshot {
     public:
     bool notify_invalid_syscall = false;
-    user_regs_struct regs = {};
+    std::vector<user_regs_struct> thread_regs;
     std::vector<MemoryRangeSnapshot> memory;
     std::vector<FileSnapshot> files;
 

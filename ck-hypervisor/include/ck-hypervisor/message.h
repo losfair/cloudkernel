@@ -20,6 +20,7 @@ enum class MessageType {
     IP_PACKET,
     IP_ADDRESS_REGISTER_V4,
     IP_ADDRESS_REGISTER_V6,
+    SNAPSHOT_CREATE,
 };
 
 class Message {

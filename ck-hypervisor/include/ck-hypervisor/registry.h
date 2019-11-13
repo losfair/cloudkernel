@@ -13,8 +13,9 @@ class ModuleHandle {
     public:
     int module_fd = -1;
     size_t file_size = 0;
+    std::string module_type;
 
-    ModuleHandle(int new_fd);
+    ModuleHandle(int new_fd, const char *ty);
     ModuleHandle(const ModuleHandle& that) = delete;
     ModuleHandle(ModuleHandle&& that) = delete;
     virtual ~ModuleHandle();
@@ -46,6 +47,7 @@ class Registry {
     }
 
     std::unique_ptr<ModuleHandle> get_module(const char *name, VersionCode version);
+    void save_module(const char *name, std::optional<VersionCode> version, const char *suffix, const uint8_t *code, size_t code_len);
 };
 
 extern Registry global_registry;
