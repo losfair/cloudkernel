@@ -6,11 +6,11 @@ use packet::ip::Protocol;
 use packet::{Packet, Builder};
 
 pub fn register_ipv4_address(addr: Ipv4Addr) -> Result<(), String> {
-    ipc::trivial_kernel_request(MessageType::IP_ADDRESS_REGISTER_V4, &addr.octets())
+    ipc::trivial_kernel_request(MessageType::IP_ADDRESS_REGISTER_V4, &addr.octets()).map(|_| ())
 }
 
 pub fn register_ipv6_address(addr: Ipv4Addr) -> Result<(), String> {
-    ipc::trivial_kernel_request(MessageType::IP_ADDRESS_REGISTER_V6, &addr.octets())
+    ipc::trivial_kernel_request(MessageType::IP_ADDRESS_REGISTER_V6, &addr.octets()).map(|_| ())
 }
 
 pub fn ip_input(packet: &mut [u8]) {

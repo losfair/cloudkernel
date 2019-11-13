@@ -53,7 +53,7 @@ pub fn wait_process(pid: u128) -> Result<(), String> {
             &payload as *const ProcessWait as *const u8,
             std::mem::size_of::<ProcessWait>(),
         ),
-    ) }
+    ) }.map(|_| ())
 }
 
 impl ProcessCreationInfo {

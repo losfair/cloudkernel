@@ -25,6 +25,7 @@ pub enum MessageType {
     IP_PACKET,
     IP_ADDRESS_REGISTER_V4,
     IP_ADDRESS_REGISTER_V6,
+    SNAPSHOT_CREATE,
 }
 
 #[repr(packed)]
@@ -63,7 +64,7 @@ pub fn poll(recipient: &mut u128, session: &mut u64, tag: &mut u32, data: &mut [
     recv_message(recipient, session, tag, data)
 }
 
-pub fn trivial_kernel_request(tag: MessageType, data: &[u8]) -> Result<(), String> {
+pub fn trivial_kernel_request(tag: MessageType, data: &[u8]) -> Result<String, String> {
     send_message(0, 0, tag as u32, data);
 
     let mut recipient: u128 = 0;
@@ -83,10 +84,11 @@ pub fn trivial_kernel_request(tag: MessageType, data: &[u8]) -> Result<(), Strin
             }
             unsafe {
                 let tr = &*(description.as_ptr() as *const u8 as *const TrivialResult);
+                let msg = std::str::from_utf8(&tr.description[..tr.description_len as usize]).unwrap().to_string();
                 if tr.code != 0 {
-                    Err(std::str::from_utf8(&tr.description[..tr.description_len as usize]).unwrap().to_string())
+                    Err(msg)
                 } else {
-                    Ok(())
+                    Ok(msg)
                 }
             }
         }

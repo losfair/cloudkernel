@@ -1,18 +1,10 @@
-pub fn snapshot_me() -> i32 {
-    #[naked]
-    #[inline(never)]
-    #[no_mangle]
-    unsafe extern "C" fn do_snapshot() -> i32 {
-        asm!(
-            r#"
-                movq $$0xffff0308, %rax
-                syscall
-                retq
-            "# :::: "volatile"
-        );
-        loop {}
-    }
-    unsafe {
-        do_snapshot()
-    }
+use crate::ipc;
+use crate::process;
+use std::time::Duration;
+
+pub fn create(pid: u128) -> Result<String, String> {
+    ipc::trivial_kernel_request(ipc::MessageType::SNAPSHOT_CREATE, unsafe { std::slice::from_raw_parts(
+        &pid as *const u128 as *const u8,
+        std::mem::size_of::<u128>(),
+    ) })
 }
