@@ -43,14 +43,19 @@ enum class SyscallFixupMethod {
 
 using DeferredSyscallHandler = std::function<bool(user_regs_struct&)>;
 
+struct RegisterDumpState {
+    std::promise<user_regs_struct> sink;
+    std::shared_future<void> completion;
+};
+
 class Process;
 
 class Thread {
     private:
     Process *process = nullptr;
     int os_tid = -1;
-    std::unique_ptr<std::promise<user_regs_struct>> register_dump_request;
-    std::mutex register_dump_request_mu;
+    std::unique_ptr<RegisterDumpState> register_dump_state;
+    std::mutex register_dump_state_mu;
 
     Thread() {}
     void run_ptrace_monitor();

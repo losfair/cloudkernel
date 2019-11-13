@@ -320,6 +320,8 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
     snapshot.notify_invalid_syscall = this->notify_invalid_syscall.load();
 
     std::vector<std::future<std::optional<user_regs_struct>>> pending_regs;
+    std::promise<void> completion;
+    std::shared_future<void> completion_fut = completion.get_future().share();
 
     {
         std::lock_guard<std::mutex> lg(threads_mu);
@@ -327,12 +329,16 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
             auto pending = std::unique_ptr<std::promise<std::optional<user_regs_struct>>>(new std::promise<std::optional<user_regs_struct>>);
             pending_regs.push_back(pending->get_future());
 
-            auto pending_l2 = std::unique_ptr<std::promise<user_regs_struct>>(new std::promise<user_regs_struct>);
-            auto pending_l2_fut = std::unique_ptr<std::future<user_regs_struct>>(new std::future<user_regs_struct>(pending_l2->get_future()));
+            std::promise<user_regs_struct> pending_l2;
+            auto pending_l2_fut = std::unique_ptr<std::future<user_regs_struct>>(new std::future<user_regs_struct>(pending_l2.get_future()));
 
             {
-                std::lock_guard<std::mutex> lg(th->register_dump_request_mu);
-                th->register_dump_request = std::move(pending_l2);
+                auto rds = std::unique_ptr<RegisterDumpState>(new RegisterDumpState);
+                rds->sink = std::move(pending_l2);
+                rds->completion = completion_fut;
+
+                std::lock_guard<std::mutex> lg(th->register_dump_state_mu);
+                th->register_dump_state = std::move(rds);
             }
 
             std::thread([pending_l2_fut(std::move(pending_l2_fut)), pending(std::move(pending))]() {
@@ -354,6 +360,7 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
             auto regs = maybe_regs.value();
             snapshot.thread_regs.push_back(regs);
         } else {
+            completion.set_value();
             return {};
         }
     }
@@ -361,10 +368,13 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
     if(auto ss = take_memory_snapshot(os_pid)) {
         snapshot.memory = std::move(ss.value());
     } else {
+        completion.set_value();
         return {};
     }
 
     snapshot.files = io_map.snapshot_files();
+
+    completion.set_value();
 
     try {
         return std::shared_ptr<std::vector<uint8_t>>(new std::vector<uint8_t>(snapshot.serialize()));
@@ -1111,14 +1121,15 @@ TraceContinuationState Thread::handle_signal(user_regs_struct regs, int& sig) {
         sig = 0;
         this->process->sandbox_state.store(SandboxState::IN_SANDBOX);
     } else if(sig == SIGTRAP) {
-        std::unique_ptr<std::promise<user_regs_struct>> regs_request;
+        std::unique_ptr<RegisterDumpState> rds;
         {
-            std::lock_guard<std::mutex> lg(register_dump_request_mu);
-            regs_request = std::move(register_dump_request);
+            std::lock_guard<std::mutex> lg(register_dump_state_mu);
+            rds = std::move(register_dump_state);
         }
-        if(regs_request) {
+        if(rds) {
             sig = 0;
-            regs_request->set_value(regs);
+            rds->sink.set_value(regs);
+            rds->completion.wait();
         }
     }
     return TraceContinuationState::CONTINUE;
