@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/user.h>
+#include <array>
 
 #define _QUOTE(x) #x
 #define _STR(x) _QUOTE(x)
@@ -22,11 +23,18 @@ static long __attribute__((naked)) enable_notify_invalid_syscall() {
     );
 }
 
-void __attribute__((noinline)) load_snapshot(int mfd, const uint8_t *snapshot, size_t len, user_regs_struct& regs_out) {
+int __attribute__((noinline)) load_snapshot(int mfd, const uint8_t *snapshot, size_t len, std::array<user_regs_struct, 1024>& regs_out) {
     size_t pos = 0;
 
     bool notify_invalid_syscall = read_vec<uint8_t>(snapshot, len, pos);
-    regs_out = read_vec<user_regs_struct>(snapshot, len, pos);
+
+    uint32_t n_threads = read_vec<uint32_t>(snapshot, len, pos);
+    if(n_threads > regs_out.size()) {
+        throw std::runtime_error("too many threads");
+    }
+    for(uint32_t i = 0; i < n_threads; i++) {
+        regs_out[i] = read_vec<user_regs_struct>(snapshot, len, pos);
+    }
 
     uint32_t n_memory_ranges = read_vec<uint32_t>(snapshot, len, pos); 
     for(uint32_t i = 0; i < n_memory_ranges; i++) {
@@ -88,4 +96,6 @@ void __attribute__((noinline)) load_snapshot(int mfd, const uint8_t *snapshot, s
     if(notify_invalid_syscall) {
         enable_notify_invalid_syscall();
     }
+
+    return n_threads;
 }

@@ -34,6 +34,7 @@
 
 int hypervisor_fd = -1;
 uint8_t __attribute__((aligned(16))) launchpad_stack[65536 * 16];
+uint8_t *mmap_end = (uint8_t *) CK_LOADER_MMAP_BASE;
 
 void debug_print(const char *text) {
     Message msg;
@@ -82,10 +83,24 @@ struct SnapshotInvocationContext {
     size_t image_size;
 };
 
+// FIXME: Currently this does not handle multithreaded snapshots correctly.
 void invoke_snapshot(SnapshotInvocationContext *ctx) {
-    user_regs_struct regs;
-    load_snapshot(ctx->mfd, (const uint8_t *) ctx->image_mapping, ctx->image_size, regs); // `ctx` becomes invalid after this
-    load_processor_state_and_unmap_loader(&regs);
+    static std::array<user_regs_struct, 1024> thread_regs;
+    int n_threads = load_snapshot(ctx->mfd, (const uint8_t *) ctx->image_mapping, ctx->image_size, thread_regs); // `ctx` becomes invalid after this
+    for(int i = 1; i < n_threads; i++) {
+        const int stack_size = 4096;
+        void *stack = mmap((void *) mmap_end, stack_size, PROT_READ, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+        if(stack == MAP_FAILED) {
+            printf("STACK MAP FAILED\n");
+            abort();
+        }
+        mmap_end += stack_size;
+        if(clone((int (*) (void *)) load_processor_state_and_unmap_loader, stack, CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM, (void *) &thread_regs[i]) < 0) {
+            printf("CLONE FAILED\n");
+            abort();
+        }
+    }
+    load_processor_state_and_unmap_loader(&thread_regs[0]);
 }
 
 struct MapInfo {
@@ -201,11 +216,12 @@ struct SharedModule {
 
                 if(this->image_size == 0) throw std::runtime_error("!!! image_size is zero");
 
-                image_mapping = mmap((void *) CK_LOADER_MMAP_BASE, this->image_size, PROT_READ, MAP_PRIVATE | MAP_FIXED, mfd, 0);
+                image_mapping = mmap((void *) mmap_end, this->image_size, PROT_READ, MAP_PRIVATE | MAP_FIXED, mfd, 0);
                 if(image_mapping == MAP_FAILED) {
                     printf("MAP_FAILED: %s\n", strerror(errno));
                     throw std::runtime_error("failed to map image into memory");
                 }
+                mmap_end += round_up(this->image_size, 4096);
             } else {
                 throw std::runtime_error("unexpected message type from hypervisor");
             }
