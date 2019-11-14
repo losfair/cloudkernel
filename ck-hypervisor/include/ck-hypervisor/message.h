@@ -4,6 +4,8 @@
 #include <sys/socket.h>
 #include <string.h>
 #include <ck-hypervisor/consts.h>
+#include <ck-hypervisor/fdset.h>
+#include <vector>
 
 enum class MessageType {
     INVALID = 0,
@@ -31,7 +33,7 @@ class Message {
     MessageType tag = MessageType::INVALID;
     const uint8_t *body = nullptr;
     size_t body_len = 0;
-    int fd = -1;
+    const FdSet *fds = nullptr;
 
     int send(int socket) {
         uint32_t raw_tag = (uint32_t) tag;
@@ -51,18 +53,25 @@ class Message {
             .msg_iov = parts,
             .msg_iovlen = 4
         };
-        char fdbuf[CMSG_SPACE(sizeof(int))] = {};
+        std::vector<char> control_buf;
 
-        if(this->fd >= 0) {
-            out_hdr.msg_control = fdbuf;
-            out_hdr.msg_controllen = sizeof(fdbuf);
+        if(fds) {
+            control_buf.resize(CMSG_SPACE(fds->fds.size() * sizeof(int)));
 
-            struct cmsghdr *cmsg = CMSG_FIRSTHDR(&out_hdr);
+            cmsghdr *cmsg = (cmsghdr *) &control_buf[0];
             cmsg->cmsg_level = SOL_SOCKET;
             cmsg->cmsg_type = SCM_RIGHTS;
-            cmsg->cmsg_len = CMSG_LEN(sizeof(this->fd));
+            cmsg->cmsg_len = CMSG_LEN(fds->fds.size() * sizeof(int));
 
-            *((int *) CMSG_DATA(cmsg)) = this->fd;
+            int *fds_raw = (int *) CMSG_DATA(cmsg);
+            size_t pos = 0;
+
+            for(int fd : fds->fds) {
+                fds_raw[pos++] = fd;
+            }
+
+            out_hdr.msg_control = &control_buf[0];
+            out_hdr.msg_controllen = control_buf.size();
         }
 
         return sendmsg(socket, &out_hdr, 0) <= 0 ? -1 : 0;

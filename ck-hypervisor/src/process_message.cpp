@@ -53,10 +53,12 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             msg.tag = MessageType::MODULE_OFFER;
             msg.body = (const uint8_t *) &module_type[0];
             msg.body_len = module_type.size();
-            msg.fd = fd_handle;
 
+            FdSet fds;
+            fds.add(fd_handle);
+            msg.fds = &fds;
             msg.send(socket);
-            close(fd_handle);
+
             break;
         }
         case MessageType::PROCESS_CREATE: {

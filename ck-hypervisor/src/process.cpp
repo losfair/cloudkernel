@@ -451,11 +451,30 @@ void Process::serve_sandbox() {
     const int header_size = sizeof(ck_pid_t) + sizeof(uint64_t) + sizeof(uint32_t);
 
     while(true) {
+        static const size_t num_fds = 8;
+        char cmsg_buf[CMSG_SPACE(sizeof(int) * num_fds)] = {};
         struct msghdr msg = {
             .msg_iov = parts,
             .msg_iovlen = 4,
+            .msg_control = (void *) cmsg_buf,
+            .msg_controllen = sizeof(cmsg_buf),
         };
-        ssize_t size = recvmsg(socket, &msg, 0);
+        ssize_t size = recvmsg(socket, &msg, MSG_CMSG_CLOEXEC);
+        if(size < 0) break;
+
+        auto recv_fds = std::unique_ptr<FdSet>(new FdSet);
+
+        for(cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if(cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+
+            size_t payload_len = cmsg->cmsg_len - sizeof(cmsghdr);
+            assert(payload_len % sizeof(int) == 0);
+            size_t n_fds = payload_len / sizeof(int);
+
+            int *cmsg_fds = (int *) CMSG_DATA(cmsg);
+            for(int i = 0; i < n_fds; i++) recv_fds->add(cmsg_fds[i]);
+        }
+        
         if(size < header_size) {
             break;
         }
@@ -473,8 +492,8 @@ void Process::serve_sandbox() {
                 owned.session = session;
                 owned.tag = tag;
                 owned.body = std::vector<uint8_t>(&m_buf[0], &m_buf[size]);
+                owned.fds = std::move(recv_fds);
                 remote_proc->pending_messages.push(std::move(owned));
-                send_ok(socket);
             }
         }
     }
