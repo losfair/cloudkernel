@@ -28,7 +28,7 @@ pub fn getpid() -> u128 {
     unsafe extern "C" fn do_getpid(out: *mut [u8; 16]) {
         asm!(
             r#"
-                movq $$0xffff0309, %rax
+                movq $$0x1f0309, %rax
                 syscall
                 ret
             "# :::: "volatile"

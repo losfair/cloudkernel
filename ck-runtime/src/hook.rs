@@ -8,7 +8,7 @@ unsafe extern "C" fn enable_syscall_hook() {
     // CK_SYS_NOTIFY_INVALID_SYSCALL
     asm!(
         r#"
-            movq $$0xffff0302, %rax
+            movq $$0x1f0302, %rax
             syscall
             ret
         "# :::: "volatile"
