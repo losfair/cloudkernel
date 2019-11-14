@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <optional>
+#include <chrono>
 
 template<class T> class BQueue {
     private:
@@ -46,7 +47,21 @@ template<class T> class BQueue {
 
     std::optional<T> pop() {
         std::unique_lock<std::mutex> lg(mu);
+
         cv.wait(lg, [this]() { return closed || !elements.empty(); });
+
+        if(closed) return std::nullopt;
+        T ret = std::move(elements.front());
+        elements.pop();
+        return ret;
+    }
+
+    std::optional<T> timed_pop(std::chrono::milliseconds duration) {
+        std::unique_lock<std::mutex> lg(mu);
+
+        bool got_something = cv.wait_for(lg, duration, [this]() { return closed || !elements.empty(); });
+        if(!got_something) return std::nullopt;
+
         if(closed) return std::nullopt;
         T ret = std::move(elements.front());
         elements.pop();

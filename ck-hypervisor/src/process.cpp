@@ -485,8 +485,7 @@ void Process::serve_sandbox() {
             handle_kernel_message(session, tag, &m_buf[0], size);
         } else {
             auto remote_proc = global_process_set.get_process(recipient);
-            if(!remote_proc) send_reject(socket, "recipient not found");
-            else {
+            if(remote_proc) {
                 OwnedMessage owned;
                 owned.sender_or_recipient = this->ck_pid; // sender
                 owned.session = session;
@@ -650,6 +649,9 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
         }
         default: break;
     } else switch(nr) {
+        case __NR_socketpair:
+            break; // TODO: Mark this process as not snapshotable
+
         case __NR_uname: {
             utsname ck_utsname = {
                 .sysname = "Cloudkernel",

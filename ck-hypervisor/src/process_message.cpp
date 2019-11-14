@@ -9,6 +9,36 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+static int send_ok(int socket) {
+    TrivialResult result(0, "");
+    return result.kernel_message().send(socket);
+}
+
+static int send_ok(int socket, const char *description) {
+    TrivialResult result(0, description);
+    return result.kernel_message().send(socket);
+}
+
+static int send_reject(int socket) {
+    TrivialResult result(-1, "");
+    return result.kernel_message().send(socket);
+}
+
+static int send_reject(int socket, const char *reason) {
+    TrivialResult result(-1, reason);
+    return result.kernel_message().send(socket);
+}
+
+static void send_invalid(int socket) {
+    Message msg;
+    msg.sender_or_recipient = (__uint128_t) (__int128_t) -1;
+    msg.session = (uint64_t) (int64_t) -1;
+    msg.tag = (MessageType) (int32_t) -1;
+    msg.body = nullptr;
+    msg.body_len = 0;
+    msg.send(socket);
+}
+
 void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem) {
     if(session != 0) {
         send_reject(socket, "invalid kernel session");
@@ -62,7 +92,7 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             break;
         }
         case MessageType::PROCESS_CREATE: {
-            if(rem < sizeof(ProcessCreationInfo)) {
+            if(rem != sizeof(ProcessCreationInfo)) {
                 send_reject(socket);
                 break;
             }
@@ -75,11 +105,36 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
                 break;
             }
 
-            info.full_name[sizeof(info.full_name) - 1] = '\0';
+            if(info.argc == 0 || info.argc > 256) {
+                send_reject(socket, "invalid number of arguments");
+                break;
+            }
 
-            std::shared_ptr<Process> new_proc(new Process({ std::string(info.full_name) }));
+            std::vector<RemoteString> argv_rptr(info.argc);
+            if(!read_memory(info.argv, argv_rptr.size() * sizeof(RemoteString), (uint8_t *) &argv_rptr[0])) {
+                send_reject(socket, "unable to read arguments");
+                break;
+            }
+
+            std::vector<std::string> argv(argv_rptr.size());
+
+            {
+                bool rejected = false;
+                for(size_t i = 0; i < argv_rptr.size(); i++) {
+                    if(argv_rptr[i].len > 65536) {
+                        send_reject(socket, "argument too long");
+                        rejected = true;
+                        break;
+                    }
+                    if(argv_rptr[i].len == 0) continue;
+                    argv[i] = std::string(argv_rptr[i].len, '\0');
+                    read_memory(argv_rptr[i].rptr, argv_rptr[i].len, (uint8_t *) &argv[i][0]);
+                }
+                if(rejected) break;
+            }
+
+            std::shared_ptr<Process> new_proc(new Process(argv));
             new_proc->parent_ck_pid = this->ck_pid;
-            new_proc->privileged = this->privileged && info.privileged;
 
             global_process_set.attach_process(new_proc);
             auto new_pid = new_proc->ck_pid;
@@ -143,13 +198,26 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             break;
         }
         case MessageType::POLL: {
-            if(auto maybe_msg = pending_messages.pop()) {
+            if(rem < sizeof(uint64_t)) {
+                send_invalid(socket);
+                break;
+            }
+            uint64_t millis = * (uint64_t *) data;
+            if(auto maybe_msg =
+                (millis == 0 ?
+                    pending_messages.pop() :
+                    pending_messages.timed_pop(std::chrono::milliseconds(millis))
+                )
+            ) {
                 auto msg = std::move(maybe_msg.value());
                 auto out = msg.borrow();
                 out.send(socket);
+            } else {
+                send_invalid(socket);
             }
             break;
         }
+        /*
         case MessageType::SERVICE_REGISTER: {
             if(!privileged) {
                 send_reject(socket, "permission denied");
@@ -181,6 +249,7 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             }
             break;
         }
+        */
         case MessageType::IP_PACKET: {
             if(rem == 0 || rem > 1500) break;
             global_router.dispatch_packet(data, rem);

@@ -4,10 +4,15 @@
 
 #define APIVER_ProcessCreationInfo 0x1
 
+struct __attribute__((packed)) RemoteString {
+    unsigned long rptr;
+    uint64_t len;
+};
+
 struct __attribute__((packed)) ProcessCreationInfo {
     uint32_t api_version;
-    char full_name[256];
-    int privileged;
+    uint32_t argc;
+    unsigned long argv;
 };
 
 #define APIVER_ProcessOffer 0x1

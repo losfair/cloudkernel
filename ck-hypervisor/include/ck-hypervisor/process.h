@@ -121,7 +121,6 @@ class Process {
 
     public:
     std::vector<std::string> args;
-    bool privileged = false;
     ck_pid_t ck_pid = 0, parent_ck_pid = 0;
 
     Process(const std::vector<std::string>& args);
@@ -171,24 +170,4 @@ static inline std::string stringify_ck_pid(ck_pid_t pid) {
     char out[33];
     for(int i = 15; i >= 0; i--) sprintf(out + (15 - i) * 2, "%02x", pid_bytes[i]);
     return std::string(out, 32);
-}
-
-static int send_ok(int socket) {
-    TrivialResult result(0, "");
-    return result.kernel_message().send(socket);
-}
-
-static int send_ok(int socket, const char *description) {
-    TrivialResult result(0, description);
-    return result.kernel_message().send(socket);
-}
-
-static int send_reject(int socket) {
-    TrivialResult result(-1, "");
-    return result.kernel_message().send(socket);
-}
-
-static int send_reject(int socket, const char *reason) {
-    TrivialResult result(-1, reason);
-    return result.kernel_message().send(socket);
 }
