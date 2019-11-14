@@ -3,6 +3,18 @@
 #include <unistd.h>
 
 void IOMap::setup_defaults() {
+    std::lock_guard<std::mutex> lg(mu);
+
+    fd_map[0] = std::shared_ptr<FileDescription>(new FileDescription);
+    fd_map[0]->snapshot = false;
+    fd_map[1] = std::shared_ptr<FileDescription>(new FileDescription);
+    fd_map[1]->snapshot = false;
+    fd_map[2] = std::shared_ptr<FileDescription>(new FileDescription);
+    fd_map[2]->snapshot = false;
+    fd_map[3] = std::shared_ptr<FileDescription>(new FileDescription);
+    fd_map[3]->snapshot = false;
+    fd_map[AT_FDCWD] = std::shared_ptr<FileDescription>(new FileDescription);
+    fd_map[AT_FDCWD]->snapshot = false;
 }
 
 std::shared_ptr<FileDescription> IOMap::get_file_description(int fd) {
@@ -34,6 +46,7 @@ std::vector<FileSnapshot> IOMap::snapshot_files() {
     std::lock_guard<std::mutex> lg(mu);
 
     for(auto& [fd, desc] : fd_map) {
+        if(!desc->snapshot) continue;
         FileSnapshot fs;
         fs.fd = fd;
         fs.user = desc->user;

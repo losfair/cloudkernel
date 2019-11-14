@@ -44,14 +44,6 @@ void debug_print(const char *text) {
     assert(msg.send(hypervisor_fd) >= 0);
 }
 
-static long __attribute__((naked)) report_hypervisor_fd(int fd) {
-    asm(
-        "movq $" _STR(CK_SYS_SET_REMOTE_HYPERVISOR_FD) ", %rax\n"
-        "syscall\n"
-        "ret\n"
-    );
-}
-
 static long __attribute__((naked)) enter_sandbox() {
     asm(
         "movq $" _STR(CK_SYS_ENTER_SANDBOX) ", %rax\n"
@@ -231,6 +223,76 @@ struct SharedModule {
 
 static SharedModule init_mod;
 
+#define SCMP_SETUP_FILE_IO(ctx, name) { \
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 1, SCMP_A0(SCMP_CMP_LE, 0x7fffffff)); \
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 1, SCMP_A0(SCMP_CMP_EQ, (unsigned long) AT_FDCWD)); }
+
+static void init_seccomp_rules() {
+    scmp_filter_ctx ctx;
+    ctx = seccomp_init(SCMP_ACT_TRACE(1));
+
+    // memory
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(brk), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(munmap), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mprotect), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(madvise), 0);
+
+    // signal handling
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigprocmask), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigreturn), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigaction), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sigaltstack), 0);
+
+    // sleep
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(nanosleep), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(clock_nanosleep), 0);
+
+    // sync
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(futex), 0);
+
+    // process
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(prctl), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(arch_prctl), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(set_tid_address), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit_group), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(restart_syscall), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sched_getaffinity), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getpid), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(gettid), 0);
+
+    // random
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getrandom), 0);
+
+    // file metadata
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(stat), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(access), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(readlink), 0);
+
+    // file I/O
+    SCMP_SETUP_FILE_IO(ctx, lseek);
+    SCMP_SETUP_FILE_IO(ctx, write);
+    SCMP_SETUP_FILE_IO(ctx, read);
+    SCMP_SETUP_FILE_IO(ctx, writev);
+    SCMP_SETUP_FILE_IO(ctx, readv);
+    SCMP_SETUP_FILE_IO(ctx, sendto);
+    SCMP_SETUP_FILE_IO(ctx, recvfrom);
+    SCMP_SETUP_FILE_IO(ctx, sendmsg);
+    SCMP_SETUP_FILE_IO(ctx, recvmsg);
+    SCMP_SETUP_FILE_IO(ctx, fstat);
+    SCMP_SETUP_FILE_IO(ctx, fcntl);
+    SCMP_SETUP_FILE_IO(ctx, readlinkat);
+    SCMP_SETUP_FILE_IO(ctx, fadvise64);
+
+    // build and load the filter
+    if(seccomp_load(ctx) < 0) {
+        printf("failed to load seccomp filter\n");
+        abort();
+    }
+    seccomp_release(ctx);
+}
+
 int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
     hypervisor_fd = new_hypervisor_fd;
 
@@ -242,7 +304,7 @@ int sandbox_run(int new_hypervisor_fd, int argc, const char *argv[]) {
     ptrace(PTRACE_TRACEME, 0, 0, 0);
     raise(SIGSTOP);
 
-    report_hypervisor_fd(hypervisor_fd);
+    init_seccomp_rules();
 
     try {
         init_mod.fetch(argv[0]);

@@ -13,6 +13,7 @@ class FileDescription {
     std::filesystem::path path;
     bool user = false;
     int flags = 0;
+    bool snapshot = true;
 };
 
 class IOMap {

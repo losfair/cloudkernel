@@ -32,6 +32,7 @@
 #include <ck-hypervisor/network.h>
 #include <sys/personality.h>
 #include <picosha2.h>
+#include <sys/utsname.h>
 
 static const bool permissive_mode = false;
 
@@ -734,7 +735,7 @@ void Thread::run_ptrace_monitor() {
         return;
     }
 
-    if(ptrace(PTRACE_SETOPTIONS, os_tid, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACECLONE) < 0) {
+    if(ptrace(PTRACE_SETOPTIONS, os_tid, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACESECCOMP | PTRACE_O_TRACECLONE) < 0) {
         printf("Unable to call ptrace() on sandbox thread.\n");
         return;
     }
@@ -747,7 +748,7 @@ void Thread::run_ptrace_monitor() {
     int stopsig = 0;
 
     while(true) {
-        ptrace(PTRACE_SYSCALL, os_tid, 0, stopsig);
+        ptrace(PTRACE_CONT, os_tid, 0, stopsig);
         if(waitpid(os_tid, &wstatus, 0) < 0) break;
 
         // Normal exit or killed.
@@ -761,12 +762,11 @@ void Thread::run_ptrace_monitor() {
         ptrace(PTRACE_GETREGS, os_tid, 0, &regs);
 
         TraceContinuationState tcs = TraceContinuationState::BREAK;
-        if(stopsig == (SIGTRAP | 0x80)) { // system call
+        if((wstatus >> 8) == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) { // system call
+            stopsig = 0;
             tcs = handle_syscall(regs, stopsig);
-            if(tcs == TraceContinuationState::CONTINUE && stopsig != (SIGTRAP | 0x80)) {
+            if(tcs == TraceContinuationState::CONTINUE && stopsig != 0) {
                 tcs = handle_signal(regs, stopsig);
-            } else {
-                stopsig = 0;
             }
         } else {
             tcs = handle_signal(regs, stopsig);
@@ -821,70 +821,21 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
         }
         default: break;
     } else switch(nr) {
-        // memory
-        case __NR_brk:
-        case __NR_mmap:
-        case __NR_munmap:
-        case __NR_mprotect:
-        case __NR_madvise:
-
-        // signal handling
-        case __NR_rt_sigprocmask:
-        case __NR_rt_sigreturn:
-        case __NR_rt_sigaction:
-        case __NR_sigaltstack:
-
-        // sleep
-        case __NR_nanosleep:
-        case __NR_clock_nanosleep:
-
-        // system information
-        case __NR_uname:
-
-        // sync
-        case __NR_futex:
-
-        // process
-        case __NR_prctl:
-        case __NR_arch_prctl:
-        case __NR_set_tid_address:
-        case __NR_exit_group:
-        case __NR_exit:
-        case __NR_restart_syscall:
-        case __NR_sched_getaffinity:
-        case __NR_getpid:
-        case __NR_gettid:
-
-        // random
-        case __NR_getrandom:
-        case __NR_readlink:
-            break;
-
-        // file I/O
-        case __NR_lseek:
-        case __NR_write:
-        case __NR_read:
-        case __NR_sendto:
-        case __NR_recvfrom:
-        case __NR_sendmsg:
-        case __NR_recvmsg:
-        case __NR_fstat:
-        case __NR_fcntl:
-        case __NR_readlinkat: {
-            if(regs.rdi <= 3 || regs.rdi == AT_FDCWD) break;
-
-            auto desc = process->io_map.get_file_description(regs.rdi);
-            if(!desc) {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SET_VALUE;
-                replace_value = -EINVAL;
-                break;
-            }
-            if(desc->user) {
-                is_invalid = true;
-                fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-                break;
-            }
+        case __NR_uname: {
+            utsname ck_utsname = {
+                .sysname = "Cloudkernel",
+                .release = "0.0.1",
+                .version = "0.0.1",
+                .machine = "x86_64",
+            };
+            std::string pid_s = stringify_ck_pid(process->ck_pid);
+            strncpy(ck_utsname.nodename, pid_s.c_str(), sizeof(ck_utsname.nodename) - 1);
+            ck_utsname.nodename[sizeof(ck_utsname.nodename) - 1] = '\0';
+            
+            is_invalid = true;
+            fixup_method = SyscallFixupMethod::SET_VALUE;
+            if(process->write_memory(regs.rdi, sizeof(utsname), (const uint8_t *) &ck_utsname)) replace_value = 0;
+            else replace_value = -EFAULT;
             break;
         }
 
