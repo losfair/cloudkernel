@@ -76,7 +76,6 @@ int __attribute__((noinline)) load_snapshot(int mfd, const uint8_t *snapshot, si
         auto path_len = read_vec<uint32_t>(snapshot, len, pos);
         std::string path; read_vec_n(snapshot, len, pos, path, path_len);
         auto offset = read_vec<uint64_t>(snapshot, len, pos);
-        auto user = (bool) read_vec<uint32_t>(snapshot, len, pos);
         auto flags = read_vec<int32_t>(snapshot, len, pos);
 
         int fd = open(path.c_str(), flags);

@@ -118,7 +118,7 @@ class Process {
         return write_memory(remote_addr, sizeof(T), (const uint8_t *) &data);
     }
     std::shared_ptr<std::vector<uint8_t>> take_snapshot();
-    void insert_fd(int fd, bool user, const std::filesystem::path& path, int flags);
+    void insert_fd(int fd, const std::filesystem::path& path, int flags);
 
     public:
     std::vector<std::string> args;

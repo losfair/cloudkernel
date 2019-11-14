@@ -32,7 +32,6 @@ std::vector<uint8_t> ProcessSnapshot::serialize() const {
         write_vec(result, (uint32_t) f.path.size());
         std::copy(f.path.begin(), f.path.end(), std::back_inserter(result));
         write_vec(result, (uint64_t) f.offset);
-        write_vec(result, (uint32_t) f.user);
         write_vec(result, (int32_t) f.flags);
     }
 

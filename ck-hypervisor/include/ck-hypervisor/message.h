@@ -21,6 +21,7 @@ enum class MessageType {
     IP_ADDRESS_REGISTER_V4,
     IP_ADDRESS_REGISTER_V6,
     SNAPSHOT_CREATE,
+    PROCESS_COMPLETION,
 };
 
 class Message {

@@ -49,7 +49,6 @@ std::vector<FileSnapshot> IOMap::snapshot_files() {
         if(!desc->snapshot) continue;
         FileSnapshot fs;
         fs.fd = fd;
-        fs.user = desc->user;
         fs.path = desc->path.c_str();
         fs.offset = lseek(fd, 0, SEEK_CUR);
         fs.flags = desc->flags;

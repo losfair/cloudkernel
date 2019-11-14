@@ -22,7 +22,6 @@ class FileSnapshot {
     int fd = -1;
     std::string path;
     uint64_t offset = 0;
-    bool user = false;
     int flags = 0;
 };
 

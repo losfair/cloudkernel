@@ -225,7 +225,8 @@ static SharedModule init_mod;
 
 #define SCMP_SETUP_FILE_IO(ctx, name) { \
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 1, SCMP_A0(SCMP_CMP_LE, 0x7fffffff)); \
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 1, SCMP_A0(SCMP_CMP_EQ, (unsigned long) AT_FDCWD)); }
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 1, SCMP_A0(SCMP_CMP_EQ, (unsigned long) AT_FDCWD)); \
+    seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(name), 2, SCMP_A0(SCMP_CMP_GE, 0x80000000), SCMP_A0(SCMP_CMP_LE, 0xefffffff)); }
 
 static void init_seccomp_rules() {
     scmp_filter_ctx ctx;
@@ -284,6 +285,14 @@ static void init_seccomp_rules() {
     SCMP_SETUP_FILE_IO(ctx, fcntl);
     SCMP_SETUP_FILE_IO(ctx, readlinkat);
     SCMP_SETUP_FILE_IO(ctx, fadvise64);
+
+    // network
+    seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(socket), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(accept), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(connect), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(listen), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(bind), 0);
+
 
     // build and load the filter
     if(seccomp_load(ctx) < 0) {

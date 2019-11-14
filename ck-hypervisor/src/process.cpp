@@ -498,15 +498,19 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
                 break;
             }
 
-            std::promise<void> ch;
-            std::future<void> ch_fut = ch.get_future();
+            auto remote_pid = info.pid;
+            auto this_pid = this->ck_pid;
             remote_proc->add_awaiter([&]() {
-                ch.set_value();
+                if(auto proc = global_process_set.get_process(this_pid)) {
+                    OwnedMessage msg;
+                    msg.tag = MessageType::PROCESS_COMPLETION;
+                    msg.body = std::vector<uint8_t>((const uint8_t *) &remote_pid, (const uint8_t *) &remote_pid + sizeof(remote_pid));
+                    proc->pending_messages.push(std::move(msg));
+                }
             });
             {
                 auto _x = std::move(remote_proc); // drop
             }
-            ch_fut.wait();
             send_ok(socket);
             break;
         }
@@ -793,7 +797,7 @@ bool Thread::register_returned_fd_after_syscall(user_regs_struct& regs, const st
     if(regs.rax >= 0) {
         auto full_path = parent_path;
         full_path += path;
-        process->insert_fd(regs.rax, false, full_path, flags);
+        process->insert_fd(regs.rax, full_path, flags);
     }
 
     return false; // is_invalid = false
@@ -831,7 +835,7 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
             std::string pid_s = stringify_ck_pid(process->ck_pid);
             strncpy(ck_utsname.nodename, pid_s.c_str(), sizeof(ck_utsname.nodename) - 1);
             ck_utsname.nodename[sizeof(ck_utsname.nodename) - 1] = '\0';
-            
+
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
             if(process->write_memory(regs.rdi, sizeof(utsname), (const uint8_t *) &ck_utsname)) replace_value = 0;
@@ -849,13 +853,12 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
                 replace_value = -EINVAL;
                 break;
             }
-            bool user = desc->user;
             auto path = desc->path;
             int flags = desc->flags;
             if(nr == __NR_dup3) flags |= (int) regs.rdx;
-            deferred.push_back([this, user, path(std::move(path)), flags](user_regs_struct& regs) {
+            deferred.push_back([this, path(std::move(path)), flags](user_regs_struct& regs) {
                 if(regs.rax >= 0) {
-                    process->insert_fd(regs.rax, user, path, flags);
+                    process->insert_fd(regs.rax, path, flags);
                 }
                 return false;
             });
@@ -940,22 +943,6 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs, int& stopsi
             is_invalid = true;
             fixup_method = SyscallFixupMethod::SET_VALUE;
             replace_value = 0;
-            break;
-        }
-        case CK_SYS_MARK_FD_AS_USER: {
-            is_invalid = true;
-            fixup_method = SyscallFixupMethod::SET_VALUE;
-
-            auto desc_p = process->io_map.get_file_description(regs.rdi);
-            if(!desc_p) {
-                replace_value = -EINVAL;
-            } else {
-                FileDescription desc = *desc_p;
-                desc.user = true;
-                process->io_map.insert_file_description(regs.rdi, std::shared_ptr<FileDescription>(new FileDescription(std::move(desc))));
-                replace_value = 0;
-            }
-
             break;
         }
         case CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER: {
@@ -1130,9 +1117,8 @@ TraceContinuationState Thread::handle_new_thread() {
     return TraceContinuationState::CONTINUE;
 }
 
-void Process::insert_fd(int fd, bool user, const std::filesystem::path& path, int flags) {
+void Process::insert_fd(int fd, const std::filesystem::path& path, int flags) {
     auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-    desc->user = user;
     desc->path = path;
     desc->flags = flags;
     io_map.insert_file_description(fd, std::move(desc));
