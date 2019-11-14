@@ -1,6 +1,6 @@
-use nix::sys::signal::{sigaction, Signal, SigAction, SigHandler, SaFlags, SigSet};
-use sc::nr;
 use libc::{c_int, c_void, siginfo_t};
+use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+use sc::nr;
 
 #[naked]
 #[inline(never)]
@@ -16,9 +16,10 @@ unsafe extern "C" fn enable_syscall_hook() {
 }
 
 extern "C" fn on_sigsys(sig_id: c_int, _siginfo: *mut siginfo_t, ucontext: *mut c_void) {
+    #[allow(unused_imports)]
     use libc::{
-        ucontext_t, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_R8,
-        REG_R9, REG_RAX, REG_RBP, REG_RBX, REG_RCX, REG_RDI, REG_RDX, REG_RIP, REG_RSI, REG_RSP,
+        ucontext_t, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_R8, REG_R9, REG_RAX,
+        REG_RBP, REG_RBX, REG_RCX, REG_RDI, REG_RDX, REG_RIP, REG_RSI, REG_RSP,
     };
 
     unsafe {
@@ -44,7 +45,12 @@ extern "C" fn on_sigsys(sig_id: c_int, _siginfo: *mut siginfo_t, ucontext: *mut 
 pub unsafe fn register_hooks() {
     sigaction(
         Signal::SIGSYS,
-        &SigAction::new(SigHandler::SigAction(on_sigsys), SaFlags::empty(), SigSet::empty())
-    ).unwrap();
+        &SigAction::new(
+            SigHandler::SigAction(on_sigsys),
+            SaFlags::empty(),
+            SigSet::empty(),
+        ),
+    )
+    .unwrap();
     enable_syscall_hook();
 }

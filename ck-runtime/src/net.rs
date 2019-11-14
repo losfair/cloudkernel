@@ -1,16 +1,18 @@
-use std::net::Ipv4Addr;
 use crate::ipc;
-use crate::ipc::MessageType;
+use crate::ipc::KernelMessageType;
 use packet::ip::v4;
 use packet::ip::Protocol;
-use packet::{Packet, Builder};
+use packet::{Builder, Packet};
+use std::net::Ipv4Addr;
 
 pub fn register_ipv4_address(addr: Ipv4Addr) -> Result<(), String> {
-    ipc::trivial_kernel_request(MessageType::IP_ADDRESS_REGISTER_V4, &addr.octets()).map(|_| ())
+    ipc::trivial_kernel_request(KernelMessageType::IP_ADDRESS_REGISTER_V4, &addr.octets())
+        .map(|_| ())
 }
 
 pub fn register_ipv6_address(addr: Ipv4Addr) -> Result<(), String> {
-    ipc::trivial_kernel_request(MessageType::IP_ADDRESS_REGISTER_V6, &addr.octets()).map(|_| ())
+    ipc::trivial_kernel_request(KernelMessageType::IP_ADDRESS_REGISTER_V6, &addr.octets())
+        .map(|_| ())
 }
 
 pub fn ip_input(packet: &mut [u8]) {
@@ -37,22 +39,35 @@ fn ipv4_input(raw_packet: &mut [u8]) {
             let payload = packet.payload();
             let icmp = match packet::icmp::Packet::new(payload) {
                 Ok(x) => x,
-                Err(_) => return
+                Err(_) => return,
             };
             if let Ok(x) = icmp.echo() {
                 if x.is_request() {
                     let response = v4::Builder::default()
-                        .source(packet.destination()).unwrap()
-                        .destination(packet.source()).unwrap()
-                        .icmp().unwrap()
-                        .echo().unwrap()
-                        .reply().unwrap()
-                        .identifier(x.identifier()).unwrap()
-                        .sequence(x.sequence()).unwrap()
-                        .payload(x.payload()).unwrap()
-                        .build().unwrap();
-                    ipc::send_message(0, 0, MessageType::IP_PACKET as u32, response.as_slice());
-
+                        .source(packet.destination())
+                        .unwrap()
+                        .destination(packet.source())
+                        .unwrap()
+                        .icmp()
+                        .unwrap()
+                        .echo()
+                        .unwrap()
+                        .reply()
+                        .unwrap()
+                        .identifier(x.identifier())
+                        .unwrap()
+                        .sequence(x.sequence())
+                        .unwrap()
+                        .payload(x.payload())
+                        .unwrap()
+                        .build()
+                        .unwrap();
+                    ipc::send_message(
+                        0,
+                        0,
+                        KernelMessageType::IP_PACKET as u32,
+                        response.as_slice(),
+                    );
                 }
             }
         }
@@ -60,5 +75,4 @@ fn ipv4_input(raw_packet: &mut [u8]) {
     }
 }
 
-fn ipv6_input(_raw_packet: &mut [u8]) {
-}
+fn ipv6_input(_raw_packet: &mut [u8]) {}

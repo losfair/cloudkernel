@@ -1,11 +1,20 @@
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 
 #[repr(packed)]
 #[derive(Copy, Clone)]
-pub struct ProcessCreationInfo {
+pub struct ProcessCreationInfo<'a> {
     _api_version: u32,
-    pub full_name: [u8; 256],
-    pub privileged: i32,
+    argc: u32,
+    argv: *const KString,
+    _phantom: PhantomData<&'a ()>,
+}
+
+#[repr(packed)]
+#[derive(Copy, Clone)]
+pub struct KString {
+    rptr: *const u8,
+    len: u64,
 }
 
 #[repr(packed)]
@@ -42,61 +51,50 @@ pub fn getpid() -> u128 {
     return result;
 }
 
-pub fn wait_process(pid: u128) -> Result<(), String> {
-    let payload = ProcessWait {
-        api_version: 1,
-        pid: pid,
+pub fn create(_args: &[String]) -> Result<u128, String> {
+    let args: Vec<KString> = _args
+        .iter()
+        .map(|x| {
+            let x = x.as_bytes();
+            KString {
+                rptr: x.as_ptr(),
+                len: x.len() as u64,
+            }
+        })
+        .collect();
+    let mut info = ProcessCreationInfo {
+        _api_version: 1,
+        argc: args.len() as u32,
+        argv: args.as_ptr(),
+        _phantom: PhantomData,
     };
-    unsafe { crate::ipc::trivial_kernel_request(
-        crate::ipc::MessageType::PROCESS_WAIT,
-        std::slice::from_raw_parts(
-            &payload as *const ProcessWait as *const u8,
-            std::mem::size_of::<ProcessWait>(),
-        ),
-    ) }.map(|_| ())
-}
 
-impl ProcessCreationInfo {
-    pub fn new(full_name: &str, privileged: bool) -> ProcessCreationInfo {
-        let mut info = ProcessCreationInfo {
-            _api_version: 1,
-            full_name: [0; 256],
-            privileged: if privileged { 1 } else { 0 },
-        };
-        let full_name = full_name.as_bytes();
-        let copy_len = if full_name.len() < info.full_name.len() {
-            full_name.len()
-        } else {
-            info.full_name.len()
-        };
-        info.full_name[..copy_len].copy_from_slice(&full_name[..copy_len]);
-        info
-    }
-
-    pub fn send(&self) -> Result<ProcessOffer, String> {
-        unsafe { crate::ipc::trivial_kernel_request(
-            crate::ipc::MessageType::PROCESS_CREATE,
+    unsafe {
+        crate::ipc::trivial_kernel_request(
+            crate::ipc::KernelMessageType::PROCESS_CREATE,
             std::slice::from_raw_parts(
-                self as *const ProcessCreationInfo as *const u8,
+                &info as *const ProcessCreationInfo as *const u8,
                 std::mem::size_of::<ProcessCreationInfo>(),
             ),
-        ) }?;
+        )
+    }?;
 
-        unsafe {
-            let mut sender: u128 = 0;
-            let mut session: u64 = 0;
-            let mut tag: u32 = 0;
-            let mut offer: MaybeUninit<ProcessOffer> = MaybeUninit::uninit();
-            let result = crate::ipc::recv_message(&mut sender, &mut session, &mut tag, std::slice::from_raw_parts_mut(
+    let offer = unsafe {
+        let mut sender: u128 = 0;
+        let mut session: u64 = 0;
+        let mut tag: u32 = 0;
+        let mut offer: MaybeUninit<ProcessOffer> = MaybeUninit::uninit();
+        let result = crate::ipc::recv_message(
+            &mut sender,
+            &mut session,
+            &mut tag,
+            std::slice::from_raw_parts_mut(
                 offer.as_mut_ptr() as *mut u8,
                 std::mem::size_of::<ProcessOffer>(),
-            ));
-            assert_eq!(result, Some(core::mem::size_of::<ProcessOffer>()));
-            Ok(offer.assume_init())
-        }
-    }
-}
-
-pub fn create(full_name: &str) -> Result<u128, String> {
-    ProcessCreationInfo::new(full_name, false).send().map(|x| x.pid)
+            ),
+        );
+        assert_eq!(result, Some(core::mem::size_of::<ProcessOffer>()));
+        offer.assume_init()
+    };
+    Ok(offer.pid)
 }
