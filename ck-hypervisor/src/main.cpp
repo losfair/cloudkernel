@@ -4,14 +4,25 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <stdio.h>
 #include <unistd.h>
 #include <ck-hypervisor/process.h>
 #include <ck-hypervisor/registry.h>
 #include <ck-hypervisor/network.h>
+#include <signal.h>
+
+static std::atomic<bool> got_interrupt(false);
+
+void handle_interrupt(int signo) {
+    got_interrupt.store(true);
+}
 
 int main(int argc, const char *argv[]) {
+    signal(SIGINT, handle_interrupt);
+    signal(SIGTERM, handle_interrupt);
+
     if(argc == 1) {
-        std::cout << "Invalid arguments" << std::endl;
+        printf("Invalid arguments\n");
         exit(1);
     }
 
@@ -36,9 +47,19 @@ int main(int argc, const char *argv[]) {
 
     while(true) {
         usleep(50000); // 50ms
+        if(got_interrupt.load()) {
+            got_interrupt.store(false);
+            global_process_set.for_each_process([](std::shared_ptr<Process>& proc) {
+                proc->kill_async();
+                return true;
+            });
+        }
         global_process_set.tick();
         if(global_process_set.get_num_processes() == 0) break;
     }
+
+    printf("All processes exited, stopping hypervisor.\n");
+    sleep(1);
 
     return 0;
 }

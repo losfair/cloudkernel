@@ -33,6 +33,8 @@
 #include <sys/personality.h>
 #include <picosha2.h>
 #include <sys/utsname.h>
+#include <sys/stat.h>
+#include <sys/mount.h>
 
 static const bool permissive_mode = false;
 
@@ -81,6 +83,22 @@ void Process::run_as_child(int socket) {
     }
     args_exec.push_back(nullptr);
 
+    int sandbox_exec_fd = open("./ck-hypervisor-sandbox", O_RDONLY | O_CLOEXEC);
+    if(sandbox_exec_fd < 0) {
+        printf("unable to open sandbox executable\n");
+        exit(1);
+    }
+
+    if(chroot(rootfs_path.c_str()) < 0) {
+        printf("chroot() failed\n");
+        exit(1);
+    }
+
+    if(mount("proc", "/proc", "proc", 0, nullptr) < 0) {
+        printf("unable to mount /proc\n");
+        exit(1);
+    }
+
     if(setgid(65534) != 0 || setuid(65534) != 0) {
         printf("unable to drop permissions\n");
         if(getuid() == 0) {
@@ -88,7 +106,8 @@ void Process::run_as_child(int socket) {
             exit(1);
         }
     }
-    execv("./ck-hypervisor-sandbox", &args_exec[0]);
+    char *envp[] = { nullptr };
+    fexecve(sandbox_exec_fd, &args_exec[0], envp);
 }
 
 Process::Process(const std::vector<std::string>& new_args) {
@@ -157,6 +176,12 @@ bool Process::write_memory(unsigned long remote_addr, size_t len, const uint8_t 
     return write_process_memory(os_pid, remote_addr, len, data);
 }
 
+static int child_start(void *arg) {
+    std::function<void()> *ctx = (std::function<void()> *) arg;
+    (*ctx)();
+    abort();
+}
+
 void Process::run() {
     int sockets[2];
 
@@ -164,17 +189,53 @@ void Process::run() {
         throw std::runtime_error("unable to create socket pair");
     }
 
+    storage_path = "/var/run";
+    storage_path += "/ck-" + stringify_ck_pid(ck_pid);
+
+    if(mkdir(storage_path.c_str(), 0755) < 0) {
+        throw std::runtime_error("unable to create temporary storage");
+    }
+
+    rootfs_path = storage_path;
+    rootfs_path += "/rootfs";
+
+    if(mkdir(rootfs_path.c_str(), 0755) < 0) {
+        throw std::runtime_error("unable to create rootfs");
+    }
+
+    procfs_path = rootfs_path;
+    procfs_path += "/proc";
+
+    if(mkdir(procfs_path.c_str(), 0755) < 0) {
+        throw std::runtime_error("unable to create /proc mountpoint");
+    }
+
     std::promise<void> child_pid;
     std::future<void> child_pid_fut = child_pid.get_future();
 
+    // No exception may be thrown after this thread starts.
     std::thread([this, &child_pid, sockets]() {
-        int new_pid = fork();
-        if(new_pid < 0) throw std::runtime_error("unable to create process");
-        if(new_pid == 0) {
+        std::function<void()> child_fn = [this, sockets]() {
             close(sockets[0]);
             run_as_child(sockets[1]);
-            _exit(1);
+        };
+        void *child_stack = nullptr;
+        while(true) {
+            child_stack = malloc(65536);
+            if(child_stack) break;
+            printf("malloc() failed, retrying\n");
+            sleep(1);
         }
+
+        int new_pid = -1;
+        while(true) {
+            new_pid = clone(child_start, (void *) ((unsigned long) child_stack + 65536), CLONE_NEWPID | CLONE_NEWNS | SIGCHLD, (void *) &child_fn);
+            if(new_pid >= 0) break;
+            printf("clone() failed, retrying\n");
+            sleep(1);
+        }
+
+        free(child_stack);
         os_pid = new_pid;
 
         auto th = Thread::first_thread(this); // reads `os_pid`
@@ -225,6 +286,13 @@ Process::~Process() {
     {
         std::lock_guard<std::mutex> lg(awaiters_mu);
         for(auto& f : awaiters) f();
+    }
+
+    if(fork() == 0) {
+        umount2(procfs_path.c_str(), MNT_DETACH);
+        execlp("rm", "rm", "-rf", storage_path.c_str(), nullptr);
+        printf("unable to remove temporary storage directory\n");
+        abort();
     }
 }
 
@@ -384,6 +452,10 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
     }
 }
 
+void Process::kill_async() {
+    kill(os_pid, SIGKILL);
+}
+
 void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem) {
     if(session != 0) {
         send_reject(socket, "invalid kernel session");
@@ -459,6 +531,7 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag, uint8_t *
             try {
                 new_proc->run();
             } catch(std::runtime_error& e) {
+                global_process_set.notify_termination(new_pid);
                 send_reject(socket, "cannot create process");
                 break;
             }
@@ -1199,6 +1272,13 @@ size_t ProcessSet::get_num_processes() {
     std::lock_guard<std::mutex> lg(this->mu);
     size_t ret = processes.size();
     return ret;
+}
+
+void ProcessSet::for_each_process(std::function<bool(std::shared_ptr<Process>&)> f) {
+    std::lock_guard<std::mutex> lg(this->mu);
+    for(auto& [pid, proc] : processes) {
+        if(!f(proc)) break;
+    }
 }
 
 ProcessSet global_process_set;

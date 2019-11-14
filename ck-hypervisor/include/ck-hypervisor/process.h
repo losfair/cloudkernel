@@ -98,10 +98,9 @@ class Process {
     IOMap io_map;
     std::atomic<bool> notify_invalid_syscall = std::atomic<bool>(false);
     std::string image_type;
-    std::mutex last_snapshot_mu;
-    std::shared_ptr<std::vector<uint8_t>> last_snapshot;
     std::mutex threads_mu;
     std::map<int, std::unique_ptr<Thread>> threads;
+    std::filesystem::path storage_path, rootfs_path, procfs_path;
 
     void serve_sandbox();
     void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data, size_t rem);
@@ -133,11 +132,7 @@ class Process {
     void run();
     void run_as_child(int socket);
     void add_awaiter(std::function<void()>&& awaiter);
-    std::shared_ptr<std::vector<uint8_t>> get_last_snapshot() {
-        std::lock_guard<std::mutex> lg(last_snapshot_mu);
-        auto ret = last_snapshot;
-        return ret;
-    }
+    void kill_async();
 
     friend class Thread;
 };
@@ -166,6 +161,7 @@ class ProcessSet {
     void notify_termination(ck_pid_t pid);
     void tick();
     size_t get_num_processes();
+    void for_each_process(std::function<bool(std::shared_ptr<Process>&)> f);
 };
 
 extern ProcessSet global_process_set;
