@@ -10,6 +10,9 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <fstream>
+#include <ck-hypervisor/profile.h>
+#include <unistd.h>
 
 static std::atomic<bool> got_interrupt(false);
 
@@ -19,26 +22,48 @@ int main(int argc, const char *argv[]) {
   signal(SIGINT, handle_interrupt);
   signal(SIGTERM, handle_interrupt);
 
-  if (argc == 1) {
-    printf("Invalid arguments\n");
+  if (const char *config_path = getenv("CK_CONFIG")) {
+    std::ifstream config_file(config_path);
+    if(!config_file) {
+      printf("cannot open config file\n");
+      exit(1);
+    }
+    std::string config_data;
+    char c = '\0';
+    while(config_file.get(c)) config_data.push_back(c);
+    if(!global_profile.parse(config_data)) {
+      printf("cannot parse config file\n");
+      exit(1);
+    }
+  } else {
+    printf("CK_CONFIG environmental variable required\n");
     exit(1);
   }
 
-  if (const char *prefix = getenv("CK_MODULE_PREFIX")) {
-    global_registry.set_prefix(prefix);
+  if(getuid() != 0) {
+    printf("must be run with root\n");
+    exit(1);
   }
 
+  global_registry.set_prefix(global_profile.module_path.c_str());
   global_router.setup_tun();
   std::thread([]() { global_router.run_loop(); }).detach();
 
-  std::vector<std::string> args;
-  for (int i = 1; i < argc; i++) {
-    args.push_back(argv[i]);
+  {
+    std::shared_lock<std::shared_mutex> lg(global_profile_mu);
+    for(auto& [k, app] : global_profile.apps) {
+      Process *raw_proc = nullptr;
+      try {
+        raw_proc = new Process(app);
+      } catch(std::runtime_error& e) {
+        printf("Unable to start process %s: %s\n", app->name.c_str(), e.what());
+        continue;
+      }
+      std::shared_ptr<Process> proc(raw_proc);
+      auto ck_pid = global_process_set.attach_process(proc);
+      proc->run();
+    }
   }
-
-  std::shared_ptr<Process> init_proc(new Process(args));
-  auto ck_pid = global_process_set.attach_process(init_proc);
-  init_proc->run();
 
   while (true) {
     usleep(50000); // 50ms

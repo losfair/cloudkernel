@@ -3,23 +3,27 @@ use std::mem::MaybeUninit;
 
 #[repr(packed)]
 #[derive(Copy, Clone)]
-pub struct ProcessCreationInfo<'a> {
+struct ProcessCreationInfo<'a> {
     _api_version: u32,
     argc: u32,
-    argv: *const KString,
-    _phantom: PhantomData<&'a ()>,
+    argv: *const KString<'a>,
+    n_capabilities: u32,
+    capabilities: *const KString<'a>,
+    n_storage_groups: u32,
+    storage_groups: *const KString<'a>,
 }
 
 #[repr(packed)]
 #[derive(Copy, Clone)]
-pub struct KString {
+struct KString<'a> {
     rptr: *const u8,
     len: u64,
+    _phantom: PhantomData<&'a ()>,
 }
 
 #[repr(packed)]
 #[derive(Copy, Clone, Debug)]
-pub struct ProcessOffer {
+struct ProcessOffer {
     api_version: u32,
     pub pid: u128,
 }
@@ -51,22 +55,33 @@ pub fn getpid() -> u128 {
     return result;
 }
 
-pub fn create(_args: &[String]) -> Result<u128, String> {
-    let args: Vec<KString> = _args
+fn collect_strings<'a, T: AsRef<str>>(x: &'a [T]) -> Vec<KString<'a>> {
+    x
         .iter()
         .map(|x| {
-            let x = x.as_bytes();
+            let x = x.as_ref().as_bytes();
             KString {
                 rptr: x.as_ptr(),
                 len: x.len() as u64,
+                _phantom: PhantomData,
             }
         })
-        .collect();
+        .collect()
+}
+
+pub fn create(_args: &[String], _caps: &[String], _storage_groups: &[String]) -> Result<u128, String> {
+    let args: Vec<KString> = collect_strings(_args);
+    let caps: Vec<KString> = collect_strings(_caps);
+    let storage_groups: Vec<KString> = collect_strings(_storage_groups);
+
     let mut info = ProcessCreationInfo {
         _api_version: 1,
         argc: args.len() as u32,
         argv: args.as_ptr(),
-        _phantom: PhantomData,
+        n_capabilities: caps.len() as u32,
+        capabilities: caps.as_ptr(),
+        n_storage_groups: storage_groups.len() as u32,
+        storage_groups: storage_groups.as_ptr(),
     };
 
     unsafe {

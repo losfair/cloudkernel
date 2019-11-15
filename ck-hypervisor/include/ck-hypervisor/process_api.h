@@ -13,6 +13,10 @@ struct __attribute__((packed)) ProcessCreationInfo {
   uint32_t api_version;
   uint32_t argc;
   unsigned long argv;
+  uint32_t n_capabilities;
+  unsigned long capabilities;
+  uint32_t n_storage_groups;
+  unsigned long storage_groups;
 };
 
 #define APIVER_ProcessOffer 0x1

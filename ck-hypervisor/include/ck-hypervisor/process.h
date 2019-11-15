@@ -22,6 +22,7 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
+#include <ck-hypervisor/profile.h>
 
 using ck_pid_t = __uint128_t;
 
@@ -105,6 +106,7 @@ private:
   std::mutex threads_mu;
   std::map<int, std::unique_ptr<Thread>> threads;
   std::filesystem::path storage_path, rootfs_path, procfs_path;
+  std::shared_ptr<AppProfile> profile;
 
   void serve_sandbox();
   void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data,
@@ -129,12 +131,12 @@ private:
   }
   std::shared_ptr<std::vector<uint8_t>> take_snapshot();
   void insert_fd(int fd, const std::filesystem::path &path, int flags);
+  std::optional<std::vector<std::string>> read_string_vec(uint32_t count, unsigned long rptr);
 
 public:
-  std::vector<std::string> args;
   ck_pid_t ck_pid = 0, parent_ck_pid = 0;
 
-  Process(const std::vector<std::string> &args);
+  Process(std::shared_ptr<AppProfile> profile);
   Process(const Process &that) = delete;
   Process(Process &&that) = delete;
   virtual ~Process();
@@ -143,6 +145,7 @@ public:
   void run_as_child(int socket);
   void add_awaiter(std::function<void()> &&awaiter);
   void kill_async();
+  bool has_capability(const char *cap);
 
   friend class Thread;
 };

@@ -8,6 +8,7 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include <filesystem>
 
 class ModuleHandle {
 public:
@@ -30,7 +31,7 @@ public:
 class Registry {
 private:
   std::mutex mu;
-  std::string prefix;
+  std::filesystem::path prefix;
 
 public:
   Registry();
@@ -38,7 +39,7 @@ public:
   Registry(Registry &&that) = delete;
   virtual ~Registry();
 
-  inline void set_prefix(const std::string &new_prefix) {
+  inline void set_prefix(const std::filesystem::path &new_prefix) {
     mu.lock();
     prefix = new_prefix;
     mu.unlock();

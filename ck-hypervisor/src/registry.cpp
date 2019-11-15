@@ -41,23 +41,23 @@ ModuleHandle::~ModuleHandle() {
 Registry::Registry() {}
 Registry::~Registry() {}
 
-static ModuleHandle *try_open_module(const char *prefix, const char *name,
+static ModuleHandle *try_open_module(const std::filesystem::path& prefix, const char *name,
                                      VersionCode version) {
   {
     std::stringstream filename_builder;
-    filename_builder << prefix << name << "_" << version.major << "."
+    filename_builder << name << "_" << version.major << "."
                      << version.minor << "." << version.patch << ".elf";
-    std::string filename = filename_builder.str();
-    if (int fd = open(filename.c_str(), O_RDONLY | O_CLOEXEC); fd >= 0) {
+    std::filesystem::path full_path = prefix;
+    full_path /= filename_builder.str();
+    if (int fd = open(full_path.c_str(), O_RDONLY | O_CLOEXEC); fd >= 0) {
       return new ModuleHandle(fd, "elf");
     }
   }
 
   {
-    std::stringstream filename_builder;
-    filename_builder << prefix << name << ".snapshot";
-    std::string filename = filename_builder.str();
-    if (int fd = open(filename.c_str(), O_RDONLY | O_CLOEXEC); fd >= 0) {
+    std::filesystem::path full_path = prefix;
+    full_path /= std::string(name) + ".snapshot";
+    if (int fd = open(full_path.c_str(), O_RDONLY | O_CLOEXEC); fd >= 0) {
       return new ModuleHandle(fd, "snapshot");
     }
   }
@@ -69,7 +69,7 @@ std::unique_ptr<ModuleHandle> Registry::get_module(const char *name,
   if (!validate_module_name(name))
     throw std::runtime_error("invalid module name");
   std::lock_guard<std::mutex> lg(this->mu);
-  auto module = try_open_module(prefix.c_str(), name, version);
+  auto module = try_open_module(prefix, name, version);
   if (!module) {
     throw std::runtime_error("unable to open module");
   }

@@ -16,7 +16,7 @@ fn main() {
         if line.len() == 0 {
             continue;
         }
-        match ck_runtime::process::create(&line) {
+        match ck_runtime::process::create(&line, &[], &[]) {
             Ok(pid) => println!("Process created. PID = {:032x}", pid),
             Err(e) => println!("Process creation failed. Error = {}", e),
         }

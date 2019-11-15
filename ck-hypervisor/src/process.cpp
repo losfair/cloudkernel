@@ -54,7 +54,7 @@ void Process::run_as_child(int socket) {
 
   std::vector<char *> args_exec;
   args_exec.push_back((char *)"ck-hypervisor-sandbox");
-  for (auto &arg : args) {
+  for (auto &arg : profile->args) {
     args_exec.push_back((char *)arg.c_str());
   }
   args_exec.push_back(nullptr);
@@ -86,10 +86,14 @@ void Process::run_as_child(int socket) {
   fexecve(sandbox_exec_fd, &args_exec[0], envp);
 }
 
-Process::Process(const std::vector<std::string> &new_args) {
-  args = new_args;
+Process::Process(std::shared_ptr<AppProfile> profile) {
   io_map.setup_defaults();
   pending_messages.set_capacity(1024);
+
+  if(profile->args.size() == 0) {
+    throw std::runtime_error("Process must receive at least one argument.");
+  }
+  this->profile = std::move(profile);
 }
 
 static bool read_process_memory(int os_pid, unsigned long remote_addr,
@@ -470,6 +474,10 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
 }
 
 void Process::kill_async() { kill(os_pid, SIGKILL); }
+
+bool Process::has_capability(const char *cap) {
+  return profile->capabilities.find(cap) != profile->capabilities.end();
+}
 
 void Process::serve_sandbox() {
   ck_pid_t recipient;
