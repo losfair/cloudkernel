@@ -105,8 +105,9 @@ private:
   std::string image_type;
   std::mutex threads_mu;
   std::map<int, std::unique_ptr<Thread>> threads;
-  std::filesystem::path storage_path, rootfs_path, procfs_path;
+  std::filesystem::path storage_path, rootfs_path;
   std::shared_ptr<AppProfile> profile;
+  std::shared_ptr<RootfsProfile> rootfs_profile;
 
   void serve_sandbox();
   void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data,

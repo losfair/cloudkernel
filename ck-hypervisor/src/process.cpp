@@ -7,6 +7,7 @@
 #include <ck-hypervisor/network.h>
 #include <ck-hypervisor/process.h>
 #include <ck-hypervisor/process_api.h>
+#include <ck-hypervisor/profile.h>
 #include <ck-hypervisor/registry.h>
 #include <ck-hypervisor/syscall.h>
 #include <fcntl.h>
@@ -121,9 +122,28 @@ void Process::run_as_child(int socket) {
     exit(1);
   }
 
-  if (mount("proc", "/proc", "proc", 0, nullptr) < 0) {
-    printf("unable to mount /proc\n");
-    exit(1);
+  for (auto &p : rootfs_profile->mounts) {
+    unsigned long flags = 0;
+    if (p.is_bind)
+      flags |= MS_BIND;
+    if (!p.is_bind && p.is_readonly)
+      flags |= MS_RDONLY;
+
+    if (mount(p.source.c_str(), p.target.c_str(), p.fstype.c_str(), flags,
+              nullptr) < 0) {
+      printf("mount() failed on path: %s\n", p.target.c_str());
+      exit(1);
+    }
+
+    // remount is needed for readonly bind mounts to work
+    if (p.is_bind && p.is_readonly) {
+      flags |= MS_REMOUNT | MS_RDONLY;
+      if (mount(p.source.c_str(), p.target.c_str(), p.fstype.c_str(), flags,
+                nullptr) < 0) {
+        printf("mount() (remount) failed on path: %s\n", p.target.c_str());
+        exit(1);
+      }
+    }
   }
 
   if (setgid(65534) != 0 || setuid(65534) != 0) {
@@ -149,6 +169,17 @@ Process::Process(std::shared_ptr<AppProfile> profile) {
     throw std::runtime_error("Process must receive at least one argument.");
   }
   this->profile = std::move(profile);
+
+  {
+    std::shared_lock<std::shared_mutex> lg(global_profile_mu);
+    if (auto it =
+            global_profile.rootfs_profiles.find(this->profile->rootfs_profile);
+        it != global_profile.rootfs_profiles.end()) {
+      this->rootfs_profile = it->second;
+    } else {
+      throw std::runtime_error("rootfs profile not found");
+    }
+  }
 }
 
 static bool read_process_memory(int os_pid, unsigned long remote_addr,
@@ -235,24 +266,26 @@ void Process::run() {
   }
 
   storage_path = "/var/run";
-  storage_path += "/ck-" + stringify_ck_pid(ck_pid);
+  storage_path /= "ck-" + stringify_ck_pid(ck_pid);
 
   if (mkdir(storage_path.c_str(), 0755) < 0) {
     throw std::runtime_error("unable to create temporary storage");
   }
 
-  rootfs_path = storage_path;
-  rootfs_path += "/rootfs";
+  rootfs_path = storage_path / "rootfs";
 
   if (mkdir(rootfs_path.c_str(), 0755) < 0) {
     throw std::runtime_error("unable to create rootfs");
   }
 
-  procfs_path = rootfs_path;
-  procfs_path += "/proc";
-
-  if (mkdir(procfs_path.c_str(), 0755) < 0) {
-    throw std::runtime_error("unable to create /proc mountpoint");
+  for (auto &p : rootfs_profile->mounts) {
+    auto path = rootfs_path;
+    path += "/";
+    path += p.target;
+    if (mkdir(path.c_str(), 0755) < 0) {
+      printf("Mountpoint creation failed: %s\n", path.c_str());
+      throw std::runtime_error("unable to create mountpoint");
+    }
   }
 
   std::promise<void> child_pid;
@@ -341,11 +374,18 @@ Process::~Process() {
       f();
   }
 
-  if (fork() == 0) {
-    umount2(procfs_path.c_str(), MNT_DETACH);
-    execlp("rm", "rm", "-rf", storage_path.c_str(), nullptr);
-    printf("unable to remove temporary storage directory\n");
-    abort();
+  for (auto &p : rootfs_profile->mounts) {
+    auto path = rootfs_path;
+    path += "/";
+    path += p.target;
+    if (umount2(path.c_str(), MNT_DETACH) < 0) {
+      printf("Warning: umount2() failed on path: %s\n", path.c_str());
+    }
+  }
+
+  if (call_external("rm", {"rm", "-rf", storage_path.c_str()}) != 0) {
+    printf("Warning: Unable to remove temporary storage at %s\n",
+           storage_path.c_str());
   }
 }
 

@@ -151,7 +151,13 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
       }
     }
 
-    std::shared_ptr<Process> new_proc(new Process(std::move(new_profile)));
+    std::shared_ptr<Process> new_proc;
+    try {
+      new_proc = std::shared_ptr<Process>(new Process(std::move(new_profile)));
+    } catch (std::runtime_error &e) {
+      send_reject(socket, "cannot create process");
+      break;
+    }
     new_proc->parent_ck_pid = this->ck_pid;
 
     global_process_set.attach_process(new_proc);

@@ -31,6 +31,7 @@ bool GlobalProfile::parse(const std::string &_input) {
       p->args = v["args"].get<std::vector<std::string>>();
       p->capabilities = v["capabilities"].get<std::set<std::string>>();
       p->storage_groups = v["storage_groups"].get<std::set<std::string>>();
+      p->rootfs_profile = v["rootfs_profile"].get<std::string>();
 
       if (auto generic_ipv4_address = v["ipv4_address"];
           !generic_ipv4_address.is_null()) {
@@ -52,6 +53,27 @@ bool GlobalProfile::parse(const std::string &_input) {
         }
       }
       apps[k] = std::move(p);
+    }
+    auto raw_rootfs_profiles =
+        input["rootfs_profiles"].get<std::map<std::string, json>>();
+    for (auto &[k, v] : raw_rootfs_profiles) {
+      auto p = std::shared_ptr<RootfsProfile>(new RootfsProfile);
+      p->name = k;
+
+      auto raw_mounts = v["mounts"].get<std::vector<json>>();
+      for (auto &x : raw_mounts) {
+        MountProfile m;
+        m.source = x["source"].get<std::string>();
+        m.target = x["target"].get<std::string>();
+        m.fstype = x["fstype"].get<std::string>();
+        if (auto maybe_bind = x["bind"]; !maybe_bind.is_null())
+          m.is_bind = maybe_bind.get<bool>();
+        if (auto maybe_readonly = x["readonly"]; !maybe_readonly.is_null())
+          m.is_readonly = maybe_readonly.get<bool>();
+        p->mounts.push_back(std::move(m));
+      }
+
+      rootfs_profiles[k] = std::move(p);
     }
     return true;
   } catch (json::parse_error &e) {
