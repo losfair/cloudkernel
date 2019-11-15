@@ -134,7 +134,7 @@ struct SharedModule {
             std::string mfd_path = ss.str();
             execv(mfd_path.c_str(), (char *const *) argv);
             std::cout << "execv() failed" << std::endl;
-            abort();
+            _exit(1);
         } else if(module_type == "snapshot") {
             enter_sandbox();
             SnapshotInvocationContext ctx = {
