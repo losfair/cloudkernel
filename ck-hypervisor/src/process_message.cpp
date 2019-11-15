@@ -97,7 +97,7 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
     break;
   }
   case MessageType::PROCESS_CREATE: {
-    if(!has_capability("process_create")) {
+    if (!has_capability("process_create")) {
       send_reject(socket, "permission denied");
       break;
     }
@@ -119,32 +119,33 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
 
     {
       auto maybe_argv = read_string_vec(info.argc, info.argv);
-      if(!maybe_argv) {
+      if (!maybe_argv) {
         send_reject(socket, "unable to read arguments");
         break;
       }
 
       auto maybe_caps = read_string_vec(info.n_capabilities, info.capabilities);
-      if(!maybe_caps) {
+      if (!maybe_caps) {
         send_reject(socket, "unable to read capabilities");
         break;
       }
 
-      auto maybe_storage_groups = read_string_vec(info.n_storage_groups, info.storage_groups);
-      if(!maybe_storage_groups) {
+      auto maybe_storage_groups =
+          read_string_vec(info.n_storage_groups, info.storage_groups);
+      if (!maybe_storage_groups) {
         send_reject(socket, "unable to read storage groups");
         break;
       }
 
       new_profile->name = "<unnamed>";
       new_profile->args = std::move(*maybe_argv);
-      for(auto& cap : *maybe_caps) {
-        if(profile->capabilities.find(cap) != profile->capabilities.end()) {
+      for (auto &cap : *maybe_caps) {
+        if (profile->capabilities.find(cap) != profile->capabilities.end()) {
           new_profile->capabilities.insert(std::move(cap));
         }
       }
-      for(auto& g : *maybe_storage_groups) {
-        if(profile->storage_groups.find(g) != profile->storage_groups.end()) {
+      for (auto &g : *maybe_storage_groups) {
+        if (profile->storage_groups.find(g) != profile->storage_groups.end()) {
           new_profile->storage_groups.insert(std::move(g));
         }
       }
@@ -315,16 +316,17 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
   }
 }
 
-std::optional<std::vector<std::string>> Process::read_string_vec(uint32_t count, unsigned long rptr) {
-  if(count == 0) return std::vector<std::string>();
+std::optional<std::vector<std::string>>
+Process::read_string_vec(uint32_t count, unsigned long rptr) {
+  if (count == 0)
+    return std::vector<std::string>();
 
   if (count > 256) {
     return std::nullopt;
   }
 
   std::vector<RemoteString> rs(count);
-  if (!read_memory(rptr, rs.size() * sizeof(RemoteString),
-                    (uint8_t *)&rs[0])) {
+  if (!read_memory(rptr, rs.size() * sizeof(RemoteString), (uint8_t *)&rs[0])) {
     return std::nullopt;
   }
 
@@ -336,8 +338,7 @@ std::optional<std::vector<std::string>> Process::read_string_vec(uint32_t count,
     if (rs[i].len == 0)
       continue;
     strings[i] = std::string(rs[i].len, '\0');
-    read_memory(rs[i].rptr, rs[i].len,
-                (uint8_t *)&strings[i][0]);
+    read_memory(rs[i].rptr, rs[i].len, (uint8_t *)&strings[i][0]);
   }
   return std::move(strings);
 }

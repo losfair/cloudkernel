@@ -41,12 +41,12 @@ ModuleHandle::~ModuleHandle() {
 Registry::Registry() {}
 Registry::~Registry() {}
 
-static ModuleHandle *try_open_module(const std::filesystem::path& prefix, const char *name,
-                                     VersionCode version) {
+static ModuleHandle *try_open_module(const std::filesystem::path &prefix,
+                                     const char *name, VersionCode version) {
   {
     std::stringstream filename_builder;
-    filename_builder << name << "_" << version.major << "."
-                     << version.minor << "." << version.patch << ".elf";
+    filename_builder << name << "_" << version.major << "." << version.minor
+                     << "." << version.patch << ".elf";
     std::filesystem::path full_path = prefix;
     full_path /= filename_builder.str();
     if (int fd = open(full_path.c_str(), O_RDONLY | O_CLOEXEC); fd >= 0) {

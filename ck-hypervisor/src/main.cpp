@@ -1,6 +1,8 @@
 #include <ck-hypervisor/network.h>
 #include <ck-hypervisor/process.h>
+#include <ck-hypervisor/profile.h>
 #include <ck-hypervisor/registry.h>
+#include <fstream>
 #include <iostream>
 #include <signal.h>
 #include <stdio.h>
@@ -10,9 +12,6 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
-#include <fstream>
-#include <ck-hypervisor/profile.h>
-#include <unistd.h>
 
 static std::atomic<bool> got_interrupt(false);
 
@@ -24,14 +23,15 @@ int main(int argc, const char *argv[]) {
 
   if (const char *config_path = getenv("CK_CONFIG")) {
     std::ifstream config_file(config_path);
-    if(!config_file) {
+    if (!config_file) {
       printf("cannot open config file\n");
       exit(1);
     }
     std::string config_data;
     char c = '\0';
-    while(config_file.get(c)) config_data.push_back(c);
-    if(!global_profile.parse(config_data)) {
+    while (config_file.get(c))
+      config_data.push_back(c);
+    if (!global_profile.parse(config_data)) {
       printf("cannot parse config file\n");
       exit(1);
     }
@@ -40,7 +40,7 @@ int main(int argc, const char *argv[]) {
     exit(1);
   }
 
-  if(getuid() != 0) {
+  if (getuid() != 0) {
     printf("must be run with root\n");
     exit(1);
   }
@@ -51,11 +51,11 @@ int main(int argc, const char *argv[]) {
 
   {
     std::shared_lock<std::shared_mutex> lg(global_profile_mu);
-    for(auto& [k, app] : global_profile.apps) {
+    for (auto &[k, app] : global_profile.apps) {
       Process *raw_proc = nullptr;
       try {
         raw_proc = new Process(app);
-      } catch(std::runtime_error& e) {
+      } catch (std::runtime_error &e) {
         printf("Unable to start process %s: %s\n", app->name.c_str(), e.what());
         continue;
       }

@@ -5,6 +5,7 @@
 #include <ck-hypervisor/iomap.h>
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/owned_message.h>
+#include <ck-hypervisor/profile.h>
 #include <ck-hypervisor/snapshot.h>
 #include <functional>
 #include <future>
@@ -22,7 +23,6 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
-#include <ck-hypervisor/profile.h>
 
 using ck_pid_t = __uint128_t;
 
@@ -131,7 +131,8 @@ private:
   }
   std::shared_ptr<std::vector<uint8_t>> take_snapshot();
   void insert_fd(int fd, const std::filesystem::path &path, int flags);
-  std::optional<std::vector<std::string>> read_string_vec(uint32_t count, unsigned long rptr);
+  std::optional<std::vector<std::string>> read_string_vec(uint32_t count,
+                                                          unsigned long rptr);
 
 public:
   ck_pid_t ck_pid = 0, parent_ck_pid = 0;

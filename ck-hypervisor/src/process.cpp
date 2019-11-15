@@ -39,11 +39,12 @@ static int call_external(const char *cmd, std::vector<const char *> args) {
   args.push_back(nullptr);
 
   int pid = -1, wstatus = -1;
-  if((pid = fork()) == 0) {
-    execvp(cmd, (char * const *) &args[0]);
+  if ((pid = fork()) == 0) {
+    execvp(cmd, (char *const *)&args[0]);
     _exit(1);
   }
-  if(waitpid(pid, &wstatus, 0) < 0) return -1;
+  if (waitpid(pid, &wstatus, 0) < 0)
+    return -1;
   return WEXITSTATUS(wstatus);
 }
 
@@ -82,34 +83,36 @@ void Process::run_as_child(int socket) {
   }
 
   Tun tun("access");
-  if(
-    call_external("ip", {"ip", "link", "set", "access", "up"}) != 0 ||
-    call_external("ip", {"ip", "route", "add", "default", "dev", "access"}) != 0 ||
-    call_external("ip", {"ip", "-6", "route", "add", "default", "dev", "access"}) != 0
-  ) {
+  if (call_external("ip", {"ip", "link", "set", "access", "up"}) != 0 ||
+      call_external("ip", {"ip", "route", "add", "default", "dev", "access"}) !=
+          0 ||
+      call_external("ip", {"ip", "-6", "route", "add", "default", "dev",
+                           "access"}) != 0) {
     printf("unable to configure interface\n");
     exit(1);
   }
-  if(profile->ipv4_address) {
+  if (profile->ipv4_address) {
     auto _addr = encode_ipv4_address(*profile->ipv4_address);
-    if(!_addr) {
+    if (!_addr) {
       printf("unable to encode ipv4 address\n");
       exit(1);
     }
     auto addr = std::move(*_addr);
-    if(call_external("ip", {"ip", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
+    if (call_external(
+            "ip", {"ip", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
       printf("unable to set ipv4 address\n");
       exit(1);
     }
   }
-  if(profile->ipv6_address) {
+  if (profile->ipv6_address) {
     auto _addr = encode_ipv6_address(*profile->ipv6_address);
-    if(!_addr) {
+    if (!_addr) {
       printf("unable to encode ipv6 address\n");
       exit(1);
     }
     auto addr = std::move(*_addr);
-    if(call_external("ip", {"ip", "-6", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
+    if (call_external("ip", {"ip", "-6", "addr", "add", addr.c_str(), "dev",
+                             "access"}) != 0) {
       printf("unable to set ipv6 address\n");
       exit(1);
     }
@@ -152,7 +155,7 @@ Process::Process(std::shared_ptr<AppProfile> profile) {
   io_map.setup_defaults();
   pending_messages.set_capacity(1024);
 
-  if(profile->args.size() == 0) {
+  if (profile->args.size() == 0) {
     throw std::runtime_error("Process must receive at least one argument.");
   }
   this->profile = std::move(profile);
@@ -283,7 +286,8 @@ void Process::run() {
     int new_pid = -1;
     while (true) {
       new_pid = clone(child_start, (void *)((unsigned long)child_stack + 65536),
-                      CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | SIGCHLD, (void *)&child_fn);
+                      CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | SIGCHLD,
+                      (void *)&child_fn);
       if (new_pid >= 0)
         break;
       printf("clone() failed, retrying\n");
@@ -451,7 +455,7 @@ take_memory_snapshot(int os_pid) {
 }
 
 std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
-  if(!allow_snapshot.load()) {
+  if (!allow_snapshot.load()) {
     return {};
   }
 
@@ -511,7 +515,7 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
 
   // Now we are sure that all threads in this process have been stopped.
   // Recheck allow_snapshot.
-  if(!allow_snapshot.load()) {
+  if (!allow_snapshot.load()) {
     completion.set_value();
     return {};
   }
