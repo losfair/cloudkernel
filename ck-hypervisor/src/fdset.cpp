@@ -4,21 +4,17 @@
 FdSet::FdSet() {}
 
 FdSet::~FdSet() {
-    for(auto x : fds) {
-        close(x);
-    }
+  for (auto x : fds) {
+    close(x);
+  }
 }
 
-void FdSet::add(int fd) {
-    fds.insert(fd);
-}
+void FdSet::add(int fd) { fds.insert(fd); }
 
 void FdSet::forget(int fd) {
-    if(auto it = fds.find(fd); it != fds.end()) {
-        fds.erase(it);
-    }
+  if (auto it = fds.find(fd); it != fds.end()) {
+    fds.erase(it);
+  }
 }
 
-void FdSet::forget() {
-    fds.clear();
-}
+void FdSet::forget() { fds.clear(); }

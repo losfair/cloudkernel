@@ -3,7 +3,7 @@
 #include <string>
 
 class Symbol {
-    public:
-    size_t addr;
-    std::string name;
+public:
+  size_t addr;
+  std::string name;
 };
