@@ -8,10 +8,9 @@
 #include <unordered_map>
 
 class Tun {
-private:
+public:
   int fd = -1;
 
-public:
   Tun(const char *name);
   Tun(const Tun &that) = delete;
   Tun(Tun &&that) = delete;

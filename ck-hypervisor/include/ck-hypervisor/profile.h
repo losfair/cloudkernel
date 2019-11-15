@@ -16,6 +16,7 @@ Capabilities:
 - profile_update
 - snapshot_create
 - process_create
+- network_assign_ipv4
 */
 
 class AppProfile {
@@ -24,6 +25,8 @@ class AppProfile {
     std::vector<std::string> args;
     std::set<std::string> capabilities;
     std::set<std::string> storage_groups;
+    std::optional<uint32_t> ipv4_address;
+    std::optional<__uint128_t> ipv6_address;
 };
 
 class StorageGroupProfile {

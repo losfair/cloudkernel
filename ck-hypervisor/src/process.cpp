@@ -1,8 +1,10 @@
 #include <assert.h>
 #include <chrono>
+#include <ck-hypervisor/byteutils.h>
 #include <ck-hypervisor/config.h>
 #include <ck-hypervisor/linking.h>
 #include <ck-hypervisor/message.h>
+#include <ck-hypervisor/network.h>
 #include <ck-hypervisor/process.h>
 #include <ck-hypervisor/process_api.h>
 #include <ck-hypervisor/registry.h>
@@ -33,6 +35,18 @@
 
 static const bool permissive_mode = false;
 
+static int call_external(const char *cmd, std::vector<const char *> args) {
+  args.push_back(nullptr);
+
+  int pid = -1, wstatus = -1;
+  if((pid = fork()) == 0) {
+    execvp(cmd, (char * const *) &args[0]);
+    _exit(1);
+  }
+  if(waitpid(pid, &wstatus, 0) < 0) return -1;
+  return WEXITSTATUS(wstatus);
+}
+
 void Process::run_as_child(int socket) {
   personality(ADDR_NO_RANDOMIZE); // snapshoting requires deterministic address
                                   // space layout
@@ -45,11 +59,13 @@ void Process::run_as_child(int socket) {
     socket = 3;
   }
 
-  int flags = fcntl(socket, F_GETFD, 0);
-  flags &= ~FD_CLOEXEC;
-  if (fcntl(socket, F_SETFD, flags) < 0) {
-    printf("unable to clear cloexec flag\n");
-    exit(1);
+  {
+    int flags = fcntl(socket, F_GETFD, 0);
+    flags &= ~FD_CLOEXEC;
+    if (fcntl(socket, F_SETFD, flags) < 0) {
+      printf("unable to clear cloexec flag on hypervisor socket\n");
+      exit(1);
+    }
   }
 
   std::vector<char *> args_exec;
@@ -63,6 +79,48 @@ void Process::run_as_child(int socket) {
   if (sandbox_exec_fd < 0) {
     printf("unable to open sandbox executable\n");
     exit(1);
+  }
+
+  Tun tun("access");
+  if(
+    call_external("ip", {"ip", "link", "set", "access", "up"}) != 0 ||
+    call_external("ip", {"ip", "route", "add", "default", "dev", "access"}) != 0 ||
+    call_external("ip", {"ip", "-6", "route", "add", "default", "dev", "access"}) != 0
+  ) {
+    printf("unable to configure interface\n");
+    exit(1);
+  }
+  if(profile->ipv4_address) {
+    auto _addr = encode_ipv4_address(*profile->ipv4_address);
+    if(!_addr) {
+      printf("unable to encode ipv4 address\n");
+      exit(1);
+    }
+    auto addr = std::move(*_addr);
+    if(call_external("ip", {"ip", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
+      printf("unable to set ipv4 address\n");
+      exit(1);
+    }
+  }
+  if(profile->ipv6_address) {
+    auto _addr = encode_ipv6_address(*profile->ipv6_address);
+    if(!_addr) {
+      printf("unable to encode ipv6 address\n");
+      exit(1);
+    }
+    auto addr = std::move(*_addr);
+    if(call_external("ip", {"ip", "-6", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
+      printf("unable to set ipv6 address\n");
+      exit(1);
+    }
+  }
+  {
+    int flags = fcntl(tun.fd, F_GETFD, 0);
+    flags &= ~FD_CLOEXEC;
+    if (fcntl(tun.fd, F_SETFD, flags) < 0) {
+      printf("unable to clear cloexec flag on tun device\n");
+      exit(1);
+    }
   }
 
   if (chroot(rootfs_path.c_str()) < 0) {
@@ -82,7 +140,11 @@ void Process::run_as_child(int socket) {
       exit(1);
     }
   }
-  char *envp[] = {nullptr};
+
+  std::stringstream tun_fd_ss;
+  tun_fd_ss << "CK_TUN=" << tun.fd;
+  std::string tun_fd_s = tun_fd_ss.str();
+  char *envp[] = {&tun_fd_s[0], nullptr};
   fexecve(sandbox_exec_fd, &args_exec[0], envp);
 }
 
@@ -221,7 +283,7 @@ void Process::run() {
     int new_pid = -1;
     while (true) {
       new_pid = clone(child_start, (void *)((unsigned long)child_stack + 65536),
-                      CLONE_NEWPID | CLONE_NEWNS | SIGCHLD, (void *)&child_fn);
+                      CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | SIGCHLD, (void *)&child_fn);
       if (new_pid >= 0)
         break;
       printf("clone() failed, retrying\n");
