@@ -92,12 +92,7 @@ void Process::run_as_child(int socket) {
     exit(1);
   }
   if (profile->ipv4_address) {
-    auto _addr = encode_ipv4_address(*profile->ipv4_address);
-    if (!_addr) {
-      printf("unable to encode ipv4 address\n");
-      exit(1);
-    }
-    auto addr = std::move(*_addr);
+    auto addr = encode_ipv4_address(*profile->ipv4_address);
     if (call_external(
             "ip", {"ip", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
       printf("unable to set ipv4 address\n");
@@ -105,12 +100,7 @@ void Process::run_as_child(int socket) {
     }
   }
   if (profile->ipv6_address) {
-    auto _addr = encode_ipv6_address(*profile->ipv6_address);
-    if (!_addr) {
-      printf("unable to encode ipv6 address\n");
-      exit(1);
-    }
-    auto addr = std::move(*_addr);
+    auto addr = encode_ipv6_address(*profile->ipv6_address);
     if (call_external("ip", {"ip", "-6", "addr", "add", addr.c_str(), "dev",
                              "access"}) != 0) {
       printf("unable to set ipv6 address\n");

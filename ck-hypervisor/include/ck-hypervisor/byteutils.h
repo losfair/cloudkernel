@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <assert.h>
 #include <optional>
 #include <stdexcept>
 #include <stdint.h>
@@ -74,20 +75,18 @@ decode_ipv6_address(const char *addr) {
   return ipv6_num;
 }
 
-static inline std::optional<std::string> __attribute__((unused))
+static inline std::string __attribute__((unused))
 encode_ipv4_address(uint32_t addr) {
   char buf[INET_ADDRSTRLEN] = {};
   std::reverse((uint8_t *)&addr, (uint8_t *)(&addr + 1));
-  if (!inet_ntop(AF_INET, (const void *)&addr, buf, sizeof(buf)))
-    return {};
+  assert(inet_ntop(AF_INET, (const void *)&addr, buf, sizeof(buf)));
   return std::string(buf);
 }
 
-static inline std::optional<std::string> __attribute__((unused))
+static inline std::string __attribute__((unused))
 encode_ipv6_address(__uint128_t addr) {
   char buf[INET6_ADDRSTRLEN] = {};
   std::reverse((uint8_t *)&addr, (uint8_t *)(&addr + 1));
-  if (!inet_ntop(AF_INET6, (const void *)&addr, buf, sizeof(buf)))
-    return {};
+  assert(inet_ntop(AF_INET6, (const void *)&addr, buf, sizeof(buf)));
   return std::string(buf);
 }
