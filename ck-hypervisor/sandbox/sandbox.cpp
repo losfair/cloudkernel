@@ -276,7 +276,14 @@ static void init_seccomp_rules() {
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(restart_syscall), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sched_getaffinity), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getpid), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getppid), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(gettid), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getuid), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getgid), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(geteuid), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getegid), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sched_yield), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getrlimit), 0);
 
   // random
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getrandom), 0);
@@ -285,8 +292,9 @@ static void init_seccomp_rules() {
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(stat), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(access), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(readlink), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getcwd), 0);
 
-  // file I/O
+  // General I/O.
   SCMP_SETUP_FILE_IO(ctx, lseek);
   SCMP_SETUP_FILE_IO(ctx, write);
   SCMP_SETUP_FILE_IO(ctx, read);
@@ -300,13 +308,25 @@ static void init_seccomp_rules() {
   SCMP_SETUP_FILE_IO(ctx, fcntl);
   SCMP_SETUP_FILE_IO(ctx, readlinkat);
   SCMP_SETUP_FILE_IO(ctx, fadvise64);
+  SCMP_SETUP_FILE_IO(ctx, newfstatat);
+  SCMP_SETUP_FILE_IO(ctx, fsync);
 
-  // network
-  seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(socket), 0);
-  seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(accept), 0);
-  seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(connect), 0);
-  seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(listen), 0);
-  seccomp_rule_add(ctx, SCMP_ACT_TRAP, SCMP_SYS(bind), 0);
+  // Epoll.
+  // epoll_create()/epoll_create1() invalidate the snapshot state.
+  SCMP_SETUP_FILE_IO(ctx, epoll_wait);
+  SCMP_SETUP_FILE_IO(ctx, epoll_ctl);
+  SCMP_SETUP_FILE_IO(ctx, epoll_pwait);
+
+  // Sockets.
+  // socket() invalidates the snapshot state.
+  SCMP_SETUP_FILE_IO(ctx, getsockopt);
+  SCMP_SETUP_FILE_IO(ctx, setsockopt);
+  SCMP_SETUP_FILE_IO(ctx, accept);
+  SCMP_SETUP_FILE_IO(ctx, connect);
+  SCMP_SETUP_FILE_IO(ctx, listen);
+  SCMP_SETUP_FILE_IO(ctx, bind);
+  SCMP_SETUP_FILE_IO(ctx, getsockname);
+  SCMP_SETUP_FILE_IO(ctx, getpeername);
 
   // build and load the filter
   if (seccomp_load(ctx) < 0) {

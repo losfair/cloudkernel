@@ -385,6 +385,10 @@ take_memory_snapshot(int os_pid) {
 }
 
 std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
+  if(!allow_snapshot.load()) {
+    return {};
+  }
+
   ProcessSnapshot snapshot;
 
   snapshot.notify_invalid_syscall = this->notify_invalid_syscall.load();
@@ -437,6 +441,13 @@ std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
       completion.set_value();
       return {};
     }
+  }
+
+  // Now we are sure that all threads in this process have been stopped.
+  // Recheck allow_snapshot.
+  if(!allow_snapshot.load()) {
+    completion.set_value();
+    return {};
   }
 
   if (auto ss = take_memory_snapshot(os_pid)) {
@@ -699,8 +710,14 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
     }
   else
     switch (nr) {
-    case __NR_socketpair:
-      break; // TODO: Mark this process as not snapshotable
+    // These syscalls make the process no longer snapshotable.
+    case __NR_epoll_create:
+    case __NR_epoll_create1:
+    case __NR_socket:
+    case __NR_socketpair: {
+      process->allow_snapshot.store(false);
+      break;
+    }
 
     case __NR_uname: {
       utsname ck_utsname = {
@@ -727,27 +744,23 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
     case __NR_dup3:
     case __NR_dup2:
     case __NR_dup: {
-      auto desc = process->io_map.get_file_description(regs.rdi);
-      if (!desc) {
-        is_invalid = true;
-        fixup_method = SyscallFixupMethod::SET_VALUE;
-        replace_value = -EINVAL;
-        break;
+      if (auto desc = process->io_map.get_file_description(regs.rdi)) {
+        auto path = desc->path;
+        int flags = desc->flags;
+        if (nr == __NR_dup3)
+          flags |= (int)regs.rdx;
+        deferred.push_back(
+            [this, path(std::move(path)), flags](user_regs_struct &regs) {
+              if (regs.rax >= 0) {
+                process->insert_fd(regs.rax, path, flags);
+              }
+              return false;
+            });
       }
-      auto path = desc->path;
-      int flags = desc->flags;
-      if (nr == __NR_dup3)
-        flags |= (int)regs.rdx;
-      deferred.push_back(
-          [this, path(std::move(path)), flags](user_regs_struct &regs) {
-            if (regs.rax >= 0) {
-              process->insert_fd(regs.rax, path, flags);
-            }
-            return false;
-          });
       break;
     }
 
+    // Silently ignore non-existent fds when deleting from iomap.
     case __NR_close: {
       int fd = regs.rdi;
       deferred.push_back([this, fd](user_regs_struct &regs) {
@@ -761,6 +774,7 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
 
     // Only allow `clone` to create threads, but not full processes.
     case __NR_clone: {
+      process->allow_snapshot.store(false);
       static const int allowed_flags =
           CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
           CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID |

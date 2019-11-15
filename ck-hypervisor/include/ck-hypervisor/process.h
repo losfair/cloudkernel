@@ -100,6 +100,7 @@ private:
       std::atomic<SandboxState>(SandboxState::NONE);
   IOMap io_map;
   std::atomic<bool> notify_invalid_syscall = std::atomic<bool>(false);
+  std::atomic<bool> allow_snapshot = std::atomic<bool>(true);
   std::string image_type;
   std::mutex threads_mu;
   std::map<int, std::unique_ptr<Thread>> threads;
