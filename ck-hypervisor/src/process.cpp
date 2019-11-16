@@ -159,6 +159,9 @@ void Process::run_as_child(int socket) {
     exit(1);
   }
 
+  if(profile->workdir.size()) chdir(profile->workdir.c_str());
+  else chdir("/");
+
   if (setgid(65534) != 0 || setuid(65534) != 0) {
     printf("unable to drop permissions\n");
     if (getuid() == 0) {

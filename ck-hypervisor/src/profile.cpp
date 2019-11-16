@@ -32,6 +32,9 @@ bool GlobalProfile::parse(const std::string &_input) {
       if(auto disabled = v["disabled"]; !disabled.is_null() && disabled.get<bool>() == true) continue;
       auto p = std::shared_ptr<AppProfile>(new AppProfile);
       p->name = k;
+      if(auto maybe_workdir = v["workdir"]; !maybe_workdir.is_null()) {
+        p->workdir = maybe_workdir.get<std::string>();
+      }
       p->args = v["args"].get<std::vector<std::string>>();
       p->capabilities = v["capabilities"].get<std::set<std::string>>();
       p->storage_groups = v["storage_groups"].get<std::set<std::string>>();

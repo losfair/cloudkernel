@@ -281,6 +281,10 @@ static void init_seccomp_rules() {
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(capget), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(capset), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(ioctl), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sysinfo), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(lstat), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getpgrp), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(pselect6), 0);
 
   // random
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getrandom), 0);
@@ -307,6 +311,8 @@ static void init_seccomp_rules() {
   SCMP_SETUP_FILE_IO(ctx, fadvise64);
   SCMP_SETUP_FILE_IO(ctx, newfstatat);
   SCMP_SETUP_FILE_IO(ctx, fsync);
+  SCMP_SETUP_FILE_IO(ctx, getdents);
+  SCMP_SETUP_FILE_IO(ctx, getdents64);
 
   // Epoll.
   // epoll_create()/epoll_create1() invalidate the snapshot state.

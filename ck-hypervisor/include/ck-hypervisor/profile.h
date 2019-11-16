@@ -22,6 +22,7 @@ Capabilities:
 class AppProfile {
 public:
   std::string name;
+  std::string workdir;
   std::vector<std::string> args;
   std::set<std::string> capabilities;
   std::set<std::string> storage_groups;
