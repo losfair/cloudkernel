@@ -4,6 +4,7 @@
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/metadata.h>
 #include <ck-hypervisor/syscall.h>
+#include <ck-hypervisor/round.h>
 #include <elf.h>
 #include <fcntl.h>
 #include <iostream>
@@ -29,20 +30,9 @@
 #include "cc.h"
 #include "snapshot_parser.h"
 
-#define __round_mask(x, y) ((__typeof__(x))((y)-1))
-#define round_up(x, y) ((((x)-1) | __round_mask(x, y)) + 1)
-
 int hypervisor_fd = -1;
 uint8_t __attribute__((aligned(16))) launchpad_stack[65536 * 16];
 uint8_t *mmap_end = (uint8_t *)CK_LOADER_MMAP_BASE;
-
-void debug_print(const char *text) {
-  Message msg;
-  msg.tag = MessageType::DEBUG_PRINT;
-  msg.body = (const uint8_t *)text;
-  msg.body_len = strlen(text);
-  assert(msg.send(hypervisor_fd) >= 0);
-}
 
 static long __attribute__((naked)) enter_sandbox() {
   asm("movq $" _STR(CK_SYS_ENTER_SANDBOX) ", %rax\n"

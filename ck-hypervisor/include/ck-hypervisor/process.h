@@ -7,6 +7,7 @@
 #include <ck-hypervisor/owned_message.h>
 #include <ck-hypervisor/profile.h>
 #include <ck-hypervisor/snapshot.h>
+#include <ck-hypervisor/network.h>
 #include <functional>
 #include <future>
 #include <map>
@@ -108,6 +109,10 @@ private:
   std::filesystem::path storage_path, rootfs_path;
   std::shared_ptr<AppProfile> profile;
   std::shared_ptr<RootfsProfile> rootfs_profile;
+  std::mutex ip_queue_mu;
+  std::unique_ptr<SharedQueue> ip_recv_queue, ip_send_queue;
+  std::thread ip_recv_queue_worker;
+  int ip_recv_queue_worker_tid = -1;
 
   void serve_sandbox();
   void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data,
@@ -134,6 +139,7 @@ private:
   void insert_fd(int fd, const std::filesystem::path &path, int flags);
   std::optional<std::vector<std::string>> read_string_vec(uint32_t count,
                                                           unsigned long rptr);
+  void run_ip_recv_queue_worker();
 
 public:
   ck_pid_t ck_pid = 0, parent_ck_pid = 0;

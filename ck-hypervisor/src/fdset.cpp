@@ -9,12 +9,4 @@ FdSet::~FdSet() {
   }
 }
 
-void FdSet::add(int fd) { fds.insert(fd); }
-
-void FdSet::forget(int fd) {
-  if (auto it = fds.find(fd); it != fds.end()) {
-    fds.erase(it);
-  }
-}
-
-void FdSet::forget() { fds.clear(); }
+void FdSet::add(int fd) { fds.push_back(fd); }

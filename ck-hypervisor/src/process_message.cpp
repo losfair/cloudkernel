@@ -184,12 +184,6 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
 
     break;
   }
-  case MessageType::DEBUG_PRINT: {
-    std::string message((const char *)data, rem);
-    auto ck_pid_s = stringify_ck_pid(this->ck_pid);
-    printf("[%s] %s\n", ck_pid_s.c_str(), message.c_str());
-    break;
-  }
   case MessageType::PROCESS_WAIT: {
     if (rem < sizeof(ProcessWait)) {
       send_reject(socket);
@@ -241,12 +235,6 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
     }
     break;
   }
-  case MessageType::IP_PACKET: {
-    if (rem == 0 || rem > 1500)
-      break;
-    global_router.dispatch_packet(data, rem);
-    break;
-  }
   case MessageType::SNAPSHOT_CREATE: {
     if (rem != sizeof(__uint128_t)) {
       send_reject(socket, "invalid pid size");
@@ -284,6 +272,76 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
     }
 
     send_ok(socket, snapshot_name.c_str());
+    break;
+  }
+  case MessageType::IP_QUEUE_OPEN: {
+    if(rem != sizeof(uint32_t)) {
+      send_reject(socket, "invalid request size");
+      break;
+    }
+    uint32_t n_elements = * (uint32_t *) data;
+    if(n_elements == 0 || n_elements > 1024) {
+      send_reject(socket, "invalid element count");
+      break;
+    }
+
+    Message msg;
+    FdSet fds;
+    bool ok = true;
+
+    do {
+      std::lock_guard<std::mutex> lg(ip_queue_mu);
+      if(ip_send_queue || ip_recv_queue) {
+        ok = false;
+        break;
+      }
+
+      try {
+        ip_send_queue = std::unique_ptr<SharedQueue>(new SharedQueue(n_elements));
+      } catch(std::runtime_error& e) {
+        printf("Failed to create IP send queue: %s\n", e.what());
+        ok = false;
+        break;
+      }
+      try {
+        ip_recv_queue = std::unique_ptr<SharedQueue>(new SharedQueue(n_elements));
+      } catch(std::runtime_error& e) {
+        printf("Failed to create IP recv queue: %s\n", e.what());
+        ok = false;
+        break;
+      }
+      auto worker_tid = std::unique_ptr<std::promise<int>>(new std::promise<int>);
+      std::future<int> worker_tid_fut = worker_tid->get_future();
+      ip_recv_queue_worker = std::thread([this, worker_tid(std::move(worker_tid))]() {
+        worker_tid->set_value(gettid());
+        run_ip_recv_queue_worker();
+      });
+      ip_recv_queue_worker_tid = worker_tid_fut.get();
+
+      int fd = ip_recv_queue->shm.create_remote_handle(); // tx
+      if(fd < 0) {
+        ok = false;
+        break;
+      }
+      fds.add(fd);
+
+      fd = ip_send_queue->shm.create_remote_handle(); // rx
+      if(fd < 0) {
+        ok = false;
+        break;
+      }
+      fds.add(fd);
+      
+      msg.tag = MessageType::IP_QUEUE_OFFER;
+      msg.fds = &fds;
+    } while(false);
+
+    if(ok) {
+      send_ok(socket);
+      msg.send(socket);
+    } else {
+      send_reject(socket, "rejected");
+    }
     break;
   }
   default:

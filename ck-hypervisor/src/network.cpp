@@ -11,6 +11,8 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 
 Router global_router;
 
@@ -120,6 +122,73 @@ Tun::Tun(const char *name) {
 
 Tun::~Tun() { close(fd); }
 
-int Tun::write(uint8_t *packet, size_t len) { return ::write(fd, packet, len); }
+int Tun::write(const uint8_t *packet, size_t len) { return ::write(fd, packet, len); }
 
 int Tun::read(uint8_t *packet, size_t len) { return ::read(fd, packet, len); }
+
+static int futex(
+  int *uaddr, int futex_op, int val,
+  const struct timespec *timeout, int *uaddr2, int val3) {
+  return syscall(__NR_futex, (long) uaddr, (long) futex_op, (long) val, (long) timeout, (long) uaddr2, (long) val3);
+}
+
+SharedQueue::SharedQueue(size_t new_num_elements) :
+  num_elements(new_num_elements),
+  shm(sizeof(SharedQueueElement) * new_num_elements, false) {
+    if(num_elements == 0) {
+      throw std::runtime_error("number of elements must be greater than zero");
+    }
+    elements = (SharedQueueElement *) shm.get_mapping();
+}
+
+SharedQueue::~SharedQueue() {
+  // storage destruction handled by SharedMemory
+}
+
+uint8_t *SharedQueue::get_data_ptr() {
+  return elements[next_element].data;
+}
+
+bool SharedQueue::can_push() {
+  return elements[next_element].filled.load() ? false : true;
+}
+
+void SharedQueue::push(size_t len) {
+  SharedQueueElement *element = &elements[next_element];
+  element->len.store(len);
+  element->filled.store(true);
+
+  futex((int *) &element->filled, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+
+  if(next_element + 1 == num_elements) next_element = 0;
+  else next_element++;
+}
+
+bool SharedQueue::can_pop() {
+  return elements[next_element].filled.load() ? true : false;
+}
+
+bool SharedQueue::wait_pop() {
+  SharedQueueElement *element = &elements[next_element];
+  while(!element->filled.load()) {
+    if(termination_requested.load()) return false;
+    int code = futex((int *) &element->filled, FUTEX_WAIT, 0, nullptr, nullptr, 0);
+    int err = errno;
+    if(code == 0) continue;
+    if(code == -1 && (err == EINTR || err == EAGAIN)) continue;
+    throw std::logic_error("unexpected result from futex(FUTEX_WAIT)");
+  }
+  return true;
+}
+
+size_t SharedQueue::current_len() {
+  uint64_t len = elements[next_element].len.load();
+  if(len > data_size()) return 0;
+  else return len;
+}
+
+void SharedQueue::pop() {
+  elements[next_element].filled.store(false);
+  if(next_element + 1 == num_elements) next_element = 0;
+  else next_element++;
+}

@@ -369,6 +369,15 @@ Process::~Process() {
   close(socket);
 
   {
+    std::lock_guard<std::mutex> lg(ip_queue_mu);
+    if(ip_recv_queue) {
+      ip_recv_queue->request_termination();
+      tgkill(getpid(), ip_recv_queue_worker_tid, SIGUSR1);
+      ip_recv_queue_worker.join();
+    }
+  }
+
+  {
     std::lock_guard<std::mutex> lg(awaiters_mu);
     for (auto &f : awaiters)
       f();
@@ -1138,6 +1147,20 @@ void Process::insert_fd(int fd, const std::filesystem::path &path, int flags) {
   desc->path = path;
   desc->flags = flags;
   io_map.insert_file_description(fd, std::move(desc));
+}
+
+void Process::run_ip_recv_queue_worker() {
+  while(true) {
+    bool ok = ip_recv_queue->wait_pop();
+    if(!ok) {
+      // termination requested
+      printf("Termination requested, exiting IP recv queue worker\n");
+      break;
+    }
+    size_t size = ip_recv_queue->current_len();
+    if(size) global_router.dispatch_packet(ip_recv_queue->get_data_ptr(), size);
+    ip_recv_queue->pop();
+  }
 }
 
 ProcessSet::ProcessSet() : pid_rand_gen(pid_rand_dev()) {}

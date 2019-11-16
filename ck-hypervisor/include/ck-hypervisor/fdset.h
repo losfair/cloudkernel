@@ -1,10 +1,10 @@
 #pragma once
 
-#include <unordered_set>
+#include <vector>
 
 class FdSet {
 public:
-  std::unordered_set<int> fds;
+  std::vector<int> fds;
 
   FdSet();
   FdSet(const FdSet &that) = delete;
@@ -12,6 +12,4 @@ public:
   ~FdSet();
 
   void add(int fd);
-  void forget(int fd);
-  void forget();
 };
