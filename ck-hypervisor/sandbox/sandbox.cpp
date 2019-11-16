@@ -3,8 +3,8 @@
 #include <ck-hypervisor/file_base.h>
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/metadata.h>
-#include <ck-hypervisor/syscall.h>
 #include <ck-hypervisor/round.h>
+#include <ck-hypervisor/syscall.h>
 #include <elf.h>
 #include <fcntl.h>
 #include <iostream>

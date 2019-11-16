@@ -1,13 +1,13 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <ck-hypervisor/shmem.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <stdint.h>
 #include <unordered_map>
-#include <ck-hypervisor/shmem.h>
-#include <atomic>
 
 class Tun {
 public:
@@ -64,7 +64,8 @@ struct SharedQueueElement {
   std::atomic<uint64_t> len;
   uint8_t data[2048 - 16];
 };
-static_assert(sizeof(SharedQueueElement) == 2048, "invalid SharedQueueElement size");
+static_assert(sizeof(SharedQueueElement) == 2048,
+              "invalid SharedQueueElement size");
 
 // SharedQueue itself is NOT thread safe.
 class SharedQueue {
@@ -78,8 +79,8 @@ public:
   SharedMemory shm;
 
   SharedQueue(size_t new_num_elements);
-  SharedQueue(const SharedQueue& that) = delete;
-  SharedQueue(SharedQueue&& that) = delete;
+  SharedQueue(const SharedQueue &that) = delete;
+  SharedQueue(SharedQueue &&that) = delete;
 
   virtual ~SharedQueue();
   uint8_t *get_data_ptr();
@@ -90,11 +91,9 @@ public:
   size_t current_len();
   void pop();
 
-  inline void request_termination() {
-    termination_requested.store(true);
-  }
+  inline void request_termination() { termination_requested.store(true); }
 
   static inline constexpr size_t data_size() {
-    return sizeof(((SharedQueueElement *) (nullptr))->data);
+    return sizeof(((SharedQueueElement *)(nullptr))->data);
   }
 };

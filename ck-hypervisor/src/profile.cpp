@@ -12,7 +12,7 @@ bool GlobalProfile::parse(const std::string &_input) {
   try {
     json input = json::parse(_input);
     module_path = input["module_path"].get<std::string>();
-    if(auto maybe_ckrt_path = input["ckrt_path"]; !maybe_ckrt_path.is_null()) {
+    if (auto maybe_ckrt_path = input["ckrt_path"]; !maybe_ckrt_path.is_null()) {
       ckrt_path = maybe_ckrt_path.get<std::string>();
     }
     auto raw_storage_groups =
@@ -29,10 +29,12 @@ bool GlobalProfile::parse(const std::string &_input) {
     }
     auto raw_apps = input["apps"].get<std::map<std::string, json>>();
     for (auto &[k, v] : raw_apps) {
-      if(auto disabled = v["disabled"]; !disabled.is_null() && disabled.get<bool>() == true) continue;
+      if (auto disabled = v["disabled"];
+          !disabled.is_null() && disabled.get<bool>() == true)
+        continue;
       auto p = std::shared_ptr<AppProfile>(new AppProfile);
       p->name = k;
-      if(auto maybe_workdir = v["workdir"]; !maybe_workdir.is_null()) {
+      if (auto maybe_workdir = v["workdir"]; !maybe_workdir.is_null()) {
         p->workdir = maybe_workdir.get<std::string>();
       }
       p->args = v["args"].get<std::vector<std::string>>();

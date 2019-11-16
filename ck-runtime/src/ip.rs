@@ -1,12 +1,12 @@
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use byteorder::{ByteOrder, LittleEndian};
 use crate::ipc;
-use nix::sys::mman::{ProtFlags, MapFlags, mmap};
-use std::os::unix::io::{RawFd};
+use byteorder::{ByteOrder, LittleEndian};
+use libc::{__errno_location, syscall, timespec, FUTEX_WAIT, FUTEX_WAKE};
+use nix::sys::mman::{mmap, MapFlags, ProtFlags};
+use std::cell::UnsafeCell;
+use std::os::unix::io::RawFd;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
-use libc::{__errno_location, timespec, syscall, FUTEX_WAIT, FUTEX_WAKE};
-use std::cell::UnsafeCell;
 
 unsafe fn futex(
     uaddr: *mut i32,
@@ -14,17 +14,9 @@ unsafe fn futex(
     val: i32,
     timeout: *const timespec,
     uaddr2: *mut i32,
-    val3: i32
+    val3: i32,
 ) -> i32 {
-    syscall(
-        libc::SYS_futex,
-        uaddr,
-        futex_op,
-        val,
-        timeout,
-        uaddr2,
-        val3,
-    ) as i32
+    syscall(libc::SYS_futex, uaddr, futex_op, val, timeout, uaddr2, val3) as i32
 }
 
 #[repr(C)]
@@ -53,15 +45,16 @@ impl SharedQueue {
     unsafe fn leaky_map(fd: RawFd, n: usize) -> SharedQueue {
         let map_size = std::mem::size_of::<Element>() * n;
         let mapped = mmap(
-            std::ptr::null_mut(), map_size as _,
-            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE, MapFlags::MAP_SHARED, 
-            fd, 0
-        ).unwrap() as *mut Element;
+            std::ptr::null_mut(),
+            map_size as _,
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_SHARED,
+            fd,
+            0,
+        )
+        .unwrap() as *mut Element;
         SharedQueue {
-            elements: std::slice::from_raw_parts_mut(
-                mapped,
-                n,
-            ),
+            elements: std::slice::from_raw_parts_mut(mapped, n),
             next_element: 0,
         }
     }
@@ -71,7 +64,9 @@ impl IPQueue {
     fn leaky_new(n: usize) -> Result<IPQueue, String> {
         assert!(std::mem::size_of::<Element>() == 2048);
 
-        let tun_fd: RawFd = std::env::var("CK_TUN").map(|x| x.parse().unwrap()).map_err(|_| "CK_TUN required".to_string())?;
+        let tun_fd: RawFd = std::env::var("CK_TUN")
+            .map(|x| x.parse().unwrap())
+            .map_err(|_| "CK_TUN required".to_string())?;
 
         let mut size_buf: [u8; 4] = [0; 4];
         LittleEndian::write_u32(&mut size_buf, n as u32);
@@ -82,18 +77,20 @@ impl IPQueue {
         let mut tag: u32 = 0;
         let fds = match ipc::recv_message_with_fds(&mut sender, &mut session, &mut tag, &mut []) {
             Some((_, fds)) => fds,
-            None => return Err("cannot receive file descriptors".into())
+            None => return Err("cannot receive file descriptors".into()),
         };
         if fds.len() != 2 {
             return Err("invalid size of file descriptors".into());
         }
         let tx_fd = fds[0];
         let rx_fd = fds[1];
-        Ok(unsafe { IPQueue {
-            tun: tun_fd,
-            tx: Mutex::new(SharedQueue::leaky_map(tx_fd, n)),
-            rx: Mutex::new(SharedQueue::leaky_map(rx_fd, n)),
-        } })
+        Ok(unsafe {
+            IPQueue {
+                tun: tun_fd,
+                tx: Mutex::new(SharedQueue::leaky_map(tx_fd, n)),
+                rx: Mutex::new(SharedQueue::leaky_map(rx_fd, n)),
+            }
+        })
     }
 
     unsafe fn run_tx_worker(&self) {
@@ -124,7 +121,7 @@ impl IPQueue {
                 std::ptr::null_mut(),
                 0,
             );
-            
+
             if tx.next_element + 1 == tx.elements.len() {
                 tx.next_element = 0;
             } else {
@@ -149,14 +146,16 @@ impl IPQueue {
                 );
                 let err = *errno_location;
                 match (code, err) {
-                    (0, _) => {},
-                    (-1, libc::EINTR) => {},
-                    (-1, libc::EAGAIN) => {},
+                    (0, _) => {}
+                    (-1, libc::EINTR) => {}
+                    (-1, libc::EAGAIN) => {}
                     _ => panic!("unexpected result from FUTEX_WAIT"),
                 }
             }
             let data = &(*element.data.get())[..element.len.load(Ordering::SeqCst) as usize];
-            match nix::unistd::write(self.tun, data) { _ => {} }
+            match nix::unistd::write(self.tun, data) {
+                _ => {}
+            }
             element.filled.store(0, Ordering::SeqCst);
             if rx.next_element + 1 == rx.elements.len() {
                 rx.next_element = 0;

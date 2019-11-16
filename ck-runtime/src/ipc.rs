@@ -13,18 +13,18 @@ pub const TRIVIAL_RESULT_DESCRIPTION_SIZE: usize = 256;
 #[derive(Copy, Clone, Debug, TryFromPrimitive)]
 #[allow(non_camel_case_types)]
 pub enum KernelMessageType {
-  INVALID = 0,
-  TRIVIAL_RESULT,
-  MODULE_REQUEST,
-  MODULE_OFFER,
-  PROCESS_CREATE,
-  PROCESS_OFFER,
-  PROCESS_WAIT,
-  POLL,
-  SNAPSHOT_CREATE,
-  PROCESS_COMPLETION,
-  IP_QUEUE_OPEN,
-  IP_QUEUE_OFFER,
+    INVALID = 0,
+    TRIVIAL_RESULT,
+    MODULE_REQUEST,
+    MODULE_OFFER,
+    PROCESS_CREATE,
+    PROCESS_OFFER,
+    PROCESS_WAIT,
+    POLL,
+    SNAPSHOT_CREATE,
+    PROCESS_COMPLETION,
+    IP_QUEUE_OPEN,
+    IP_QUEUE_OFFER,
 }
 
 #[repr(u32)]

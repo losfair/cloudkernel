@@ -56,8 +56,7 @@ pub fn getpid() -> u128 {
 }
 
 fn collect_strings<'a, T: AsRef<str>>(x: &'a [T]) -> Vec<KString<'a>> {
-    x
-        .iter()
+    x.iter()
         .map(|x| {
             let x = x.as_ref().as_bytes();
             KString {
@@ -69,7 +68,11 @@ fn collect_strings<'a, T: AsRef<str>>(x: &'a [T]) -> Vec<KString<'a>> {
         .collect()
 }
 
-pub fn create(_args: &[String], _caps: &[String], _storage_groups: &[String]) -> Result<u128, String> {
+pub fn create(
+    _args: &[String],
+    _caps: &[String],
+    _storage_groups: &[String],
+) -> Result<u128, String> {
     let args: Vec<KString> = collect_strings(_args);
     let caps: Vec<KString> = collect_strings(_caps);
     let storage_groups: Vec<KString> = collect_strings(_storage_groups);

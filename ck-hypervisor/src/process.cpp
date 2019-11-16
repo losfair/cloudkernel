@@ -84,9 +84,9 @@ void Process::run_as_child(int socket) {
   }
 
   int ckrt_fd = -1;
-  if(global_profile.ckrt_path.size()) {
+  if (global_profile.ckrt_path.size()) {
     ckrt_fd = open(global_profile.ckrt_path.c_str(), O_RDONLY); // inherit
-    if(ckrt_fd < 0) {
+    if (ckrt_fd < 0) {
       printf("unable to open ckrt\n");
       exit(1);
     }
@@ -159,8 +159,10 @@ void Process::run_as_child(int socket) {
     exit(1);
   }
 
-  if(profile->workdir.size()) chdir(profile->workdir.c_str());
-  else chdir("/");
+  if (profile->workdir.size())
+    chdir(profile->workdir.c_str());
+  else
+    chdir("/");
 
   if (setgid(65534) != 0 || setuid(65534) != 0) {
     printf("unable to drop permissions\n");
@@ -181,7 +183,7 @@ void Process::run_as_child(int socket) {
   }
 
   std::string ld_preload_s;
-  if(ckrt_fd >= 0) {
+  if (ckrt_fd >= 0) {
     std::stringstream ss;
     ss << "LD_PRELOAD=/proc/self/fd/" << ckrt_fd;
     ld_preload_s = ss.str();
@@ -294,7 +296,7 @@ static void insert_route(__uint128_t ck_pid, IPAddress unified_addr) {
   auto ep = std::shared_ptr<RoutingEndpoint>(new RoutingEndpoint);
   ep->ck_pid = ck_pid;
   ep->on_packet = [unified_addr, ck_pid](uint8_t *packet, size_t len) {
-    if(auto proc = global_process_set.get_process(ck_pid)) {
+    if (auto proc = global_process_set.get_process(ck_pid)) {
       proc->input_ip_packet(packet, len);
     } else {
       global_router.unregister_route(unified_addr, ck_pid);
@@ -305,9 +307,10 @@ static void insert_route(__uint128_t ck_pid, IPAddress unified_addr) {
 
 void Process::input_ip_packet(const uint8_t *data, size_t len) {
   std::lock_guard<std::mutex> lg(ip_queue_mu);
-  if(ip_send_queue && ip_send_queue->can_push()) {
+  if (ip_send_queue && ip_send_queue->can_push()) {
     uint8_t *place = ip_send_queue->get_data_ptr();
-    size_t send_len = len < SharedQueue::data_size() ? len : SharedQueue::data_size();
+    size_t send_len =
+        len < SharedQueue::data_size() ? len : SharedQueue::data_size();
     std::copy(data, data + send_len, place);
     ip_send_queue->push(send_len);
   }
@@ -315,11 +318,12 @@ void Process::input_ip_packet(const uint8_t *data, size_t len) {
 }
 
 void Process::run() {
-  if(profile->ipv4_address) {
-    __uint128_t unified_addr =  ((__uint128_t)0xffff00000000ull) | (__uint128_t) *profile->ipv4_address;
+  if (profile->ipv4_address) {
+    __uint128_t unified_addr =
+        ((__uint128_t)0xffff00000000ull) | (__uint128_t)*profile->ipv4_address;
     insert_route(ck_pid, unified_addr);
   }
-  if(profile->ipv6_address) {
+  if (profile->ipv6_address) {
     insert_route(ck_pid, *profile->ipv6_address);
   }
   int sockets[2];
@@ -433,7 +437,7 @@ Process::~Process() {
 
   {
     std::lock_guard<std::mutex> lg(ip_queue_mu);
-    if(ip_recv_queue) {
+    if (ip_recv_queue) {
       ip_recv_queue->request_termination();
       ip_recv_queue_worker.join();
     }

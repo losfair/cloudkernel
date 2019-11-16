@@ -40,15 +40,16 @@ static void send_invalid(int socket) {
 }
 
 static void run_ip_recv_queue_worker(SharedQueue &q) {
-  while(true) {
+  while (true) {
     bool ok = q.wait_pop();
-    if(!ok) {
+    if (!ok) {
       // termination requested
       printf("Termination requested, exiting IP recv queue worker\n");
       break;
     }
     size_t size = q.current_len();
-    if(size) global_router.dispatch_packet(q.get_data_ptr(), size);
+    if (size)
+      global_router.dispatch_packet(q.get_data_ptr(), size);
     q.pop();
   }
 }
@@ -289,12 +290,12 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
     break;
   }
   case MessageType::IP_QUEUE_OPEN: {
-    if(rem != sizeof(uint32_t)) {
+    if (rem != sizeof(uint32_t)) {
       send_reject(socket, "invalid request size");
       break;
     }
-    uint32_t n_elements = * (uint32_t *) data;
-    if(n_elements == 0 || n_elements > 1024) {
+    uint32_t n_elements = *(uint32_t *)data;
+    if (n_elements == 0 || n_elements > 1024) {
       send_reject(socket, "invalid element count");
       break;
     }
@@ -305,48 +306,49 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
 
     do {
       std::lock_guard<std::mutex> lg(ip_queue_mu);
-      if(ip_send_queue || ip_recv_queue) {
+      if (ip_send_queue || ip_recv_queue) {
         ok = false;
         break;
       }
 
       try {
-        ip_send_queue = std::unique_ptr<SharedQueue>(new SharedQueue(n_elements));
-      } catch(std::runtime_error& e) {
+        ip_send_queue =
+            std::unique_ptr<SharedQueue>(new SharedQueue(n_elements));
+      } catch (std::runtime_error &e) {
         printf("Failed to create IP send queue: %s\n", e.what());
         ok = false;
         break;
       }
       try {
-        ip_recv_queue = std::unique_ptr<SharedQueue>(new SharedQueue(n_elements));
-      } catch(std::runtime_error& e) {
+        ip_recv_queue =
+            std::unique_ptr<SharedQueue>(new SharedQueue(n_elements));
+      } catch (std::runtime_error &e) {
         printf("Failed to create IP recv queue: %s\n", e.what());
         ok = false;
         break;
       }
-      ip_recv_queue_worker = std::thread([this]() {
-        run_ip_recv_queue_worker(*ip_recv_queue);
-      });
+      ip_recv_queue_worker =
+          std::thread([this]() { run_ip_recv_queue_worker(*ip_recv_queue); });
 
       int fd = ip_recv_queue->shm.create_remote_handle(); // tx
-      if(fd < 0) {
+      if (fd < 0) {
         ok = false;
         break;
       }
       fds.add(fd);
 
       fd = ip_send_queue->shm.create_remote_handle(); // rx
-      if(fd < 0) {
+      if (fd < 0) {
         ok = false;
         break;
       }
       fds.add(fd);
-      
+
       msg.tag = MessageType::IP_QUEUE_OFFER;
       msg.fds = &fds;
-    } while(false);
+    } while (false);
 
-    if(ok) {
+    if (ok) {
       send_ok(socket);
       msg.send(socket);
     } else {

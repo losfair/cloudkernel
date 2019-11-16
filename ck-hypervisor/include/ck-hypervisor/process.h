@@ -4,10 +4,10 @@
 #include <ck-hypervisor/bqueue.h>
 #include <ck-hypervisor/iomap.h>
 #include <ck-hypervisor/message.h>
+#include <ck-hypervisor/network.h>
 #include <ck-hypervisor/owned_message.h>
 #include <ck-hypervisor/profile.h>
 #include <ck-hypervisor/snapshot.h>
-#include <ck-hypervisor/network.h>
 #include <functional>
 #include <future>
 #include <map>

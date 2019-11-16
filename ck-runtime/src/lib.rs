@@ -7,10 +7,10 @@ pub extern crate nix;
 extern crate lazy_static;
 
 pub mod hook;
+pub mod ip;
 pub mod ipc;
 pub mod poll;
 pub mod process;
 pub mod snapshot;
 pub mod tangle;
 pub mod timer;
-pub mod ip;
