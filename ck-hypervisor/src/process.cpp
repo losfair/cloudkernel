@@ -83,6 +83,15 @@ void Process::run_as_child(int socket) {
     exit(1);
   }
 
+  int ckrt_fd = -1;
+  if(global_profile.ckrt_path.size()) {
+    ckrt_fd = open(global_profile.ckrt_path.c_str(), O_RDONLY); // inherit
+    if(ckrt_fd < 0) {
+      printf("unable to open ckrt\n");
+      exit(1);
+    }
+  }
+
   Tun tun("access");
   if (call_external("ip", {"ip", "link", "set", "access", "up"}) != 0 ||
       call_external("ip", {"ip", "route", "add", "default", "dev", "access"}) !=
@@ -158,11 +167,27 @@ void Process::run_as_child(int socket) {
     }
   }
 
-  std::stringstream tun_fd_ss;
-  tun_fd_ss << "CK_TUN=" << tun.fd;
-  std::string tun_fd_s = tun_fd_ss.str();
-  char *envp[] = {&tun_fd_s[0], nullptr};
-  fexecve(sandbox_exec_fd, &args_exec[0], envp);
+  std::vector<char *> envp;
+
+  std::string tun_fd_s;
+  {
+    std::stringstream ss;
+    ss << "CK_TUN=" << tun.fd;
+    tun_fd_s = ss.str();
+    envp.push_back(&tun_fd_s[0]);
+  }
+
+  std::string ld_preload_s;
+  if(ckrt_fd >= 0) {
+    std::stringstream ss;
+    ss << "LD_PRELOAD=/proc/self/fd/" << ckrt_fd;
+    ld_preload_s = ss.str();
+    envp.push_back(&ld_preload_s[0]);
+  }
+
+  envp.push_back(nullptr);
+
+  fexecve(sandbox_exec_fd, &args_exec[0], &envp[0]);
 }
 
 Process::Process(std::shared_ptr<AppProfile> profile) {

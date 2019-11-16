@@ -1,0 +1,14 @@
+[package]
+name = "ck-runtime-preload"
+version = "0.1.0"
+authors = ["losfair <zhy20000919@hotmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "ckrt"
+crate-type = ["cdylib"]
+
+[dependencies]
+ck-runtime = { path = "../ck-runtime" }

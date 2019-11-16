@@ -52,6 +52,7 @@ public:
 class GlobalProfile {
 public:
   std::string module_path;
+  std::string ckrt_path;
   std::map<std::string, StorageGroupProfile> storage_groups;
   std::map<std::string, std::shared_ptr<AppProfile>> apps;
   std::map<std::string, std::shared_ptr<RootfsProfile>> rootfs_profiles;

@@ -12,6 +12,9 @@ bool GlobalProfile::parse(const std::string &_input) {
   try {
     json input = json::parse(_input);
     module_path = input["module_path"].get<std::string>();
+    if(auto maybe_ckrt_path = input["ckrt_path"]; !maybe_ckrt_path.is_null()) {
+      ckrt_path = maybe_ckrt_path.get<std::string>();
+    }
     auto raw_storage_groups =
         input["storage_groups"].get<std::map<std::string, json>>();
     for (auto &[k, v] : raw_storage_groups) {
