@@ -27,6 +27,7 @@ unsafe fn futex(
     ) as i32
 }
 
+#[repr(C)]
 struct Element {
     filled: AtomicU32,
     _padding: u32,
