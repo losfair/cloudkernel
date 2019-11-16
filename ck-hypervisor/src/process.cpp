@@ -117,11 +117,6 @@ void Process::run_as_child(int socket) {
     }
   }
 
-  if (chroot(rootfs_path.c_str()) < 0) {
-    printf("chroot() failed\n");
-    exit(1);
-  }
-
   for (auto &p : rootfs_profile->mounts) {
     unsigned long flags = 0;
     if (p.is_bind)
@@ -129,21 +124,30 @@ void Process::run_as_child(int socket) {
     if (!p.is_bind && p.is_readonly)
       flags |= MS_RDONLY;
 
-    if (mount(p.source.c_str(), p.target.c_str(), p.fstype.c_str(), flags,
+    std::filesystem::path target_path = rootfs_path;
+    target_path += "/";
+    target_path += p.target;
+
+    if (mount(p.source.c_str(), target_path.c_str(), p.fstype.c_str(), flags,
               nullptr) < 0) {
-      printf("mount() failed on path: %s\n", p.target.c_str());
+      printf("mount() failed on path: %s\n", target_path.c_str());
       exit(1);
     }
 
     // remount is needed for readonly bind mounts to work
     if (p.is_bind && p.is_readonly) {
       flags |= MS_REMOUNT | MS_RDONLY;
-      if (mount(p.source.c_str(), p.target.c_str(), p.fstype.c_str(), flags,
+      if (mount(p.source.c_str(), target_path.c_str(), p.fstype.c_str(), flags,
                 nullptr) < 0) {
-        printf("mount() (remount) failed on path: %s\n", p.target.c_str());
+        printf("mount() (remount) failed on path: %s\n", target_path.c_str());
         exit(1);
       }
     }
+  }
+
+  if (chroot(rootfs_path.c_str()) < 0) {
+    printf("chroot() failed\n");
+    exit(1);
   }
 
   if (setgid(65534) != 0 || setuid(65534) != 0) {
