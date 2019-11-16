@@ -247,37 +247,6 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
     global_router.dispatch_packet(data, rem);
     break;
   }
-  case MessageType::IP_ADDRESS_REGISTER_V4: {
-    if (rem != 4) {
-      send_reject(socket, "invalid address length");
-      break;
-    }
-
-    uint32_t addr = *(uint32_t *)data;
-    std::reverse((uint8_t *)&addr, ((uint8_t *)&addr) + 4);
-    __uint128_t full_addr =
-        ((__uint128_t)0xffff00000000ull) | (__uint128_t)addr;
-
-    auto endpoint = std::shared_ptr<RoutingEndpoint>(new RoutingEndpoint);
-
-    // This function can be recursively called within another
-    // `handle_kernel_message`. Make sure locks are held properly.
-    endpoint->on_packet = [full_addr, ck_pid(this->ck_pid)](uint8_t *data,
-                                                            size_t len) {
-      if (auto proc = global_process_set.get_process(ck_pid)) {
-        OwnedMessage msg;
-        msg.tag = MessageType::IP_PACKET;
-        msg.body = std::vector<uint8_t>(data, data + len);
-        proc->pending_messages.push(std::move(msg));
-      } else {
-        global_router.unregister_route(full_addr, ck_pid);
-      }
-    };
-    global_router.register_route(full_addr, std::move(endpoint));
-
-    send_ok(socket);
-    break;
-  }
   case MessageType::SNAPSHOT_CREATE: {
     if (rem != sizeof(__uint128_t)) {
       send_reject(socket, "invalid pid size");
