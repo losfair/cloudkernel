@@ -3,6 +3,7 @@ use std::io::{Write, BufRead};
 fn main() {
     unsafe {
         ck_runtime::hook::register_hooks();
+        ck_runtime::ip::start();
     }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();

@@ -13,21 +13,18 @@ pub const TRIVIAL_RESULT_DESCRIPTION_SIZE: usize = 256;
 #[derive(Copy, Clone, Debug, TryFromPrimitive)]
 #[allow(non_camel_case_types)]
 pub enum KernelMessageType {
-    INVALID = 0,
-    TRIVIAL_RESULT,
-    MODULE_REQUEST,
-    MODULE_OFFER,
-    PROCESS_CREATE,
-    PROCESS_OFFER,
-    DEBUG_PRINT,
-    PROCESS_WAIT,
-    POLL,
-    SERVICE_REGISTER,
-    SERVICE_GET,
-    IP_PACKET,
-    IP_ADDRESS_REGISTER_V4,
-    IP_ADDRESS_REGISTER_V6,
-    SNAPSHOT_CREATE,
+  INVALID = 0,
+  TRIVIAL_RESULT,
+  MODULE_REQUEST,
+  MODULE_OFFER,
+  PROCESS_CREATE,
+  PROCESS_OFFER,
+  PROCESS_WAIT,
+  POLL,
+  SNAPSHOT_CREATE,
+  PROCESS_COMPLETION,
+  IP_QUEUE_OPEN,
+  IP_QUEUE_OFFER,
 }
 
 #[repr(u32)]
@@ -129,7 +126,7 @@ pub fn recv_message(
 }
 
 pub fn recv_message_with_fds(
-    recipient: &mut u128,
+    sender: &mut u128,
     session: &mut u64,
     tag: &mut u32,
     data: &mut [u8],
@@ -137,7 +134,7 @@ pub fn recv_message_with_fds(
     let iovs: [IoVec<&mut [u8]>; 4] = unsafe {
         [
             IoVec::from_mut_slice(std::slice::from_raw_parts_mut(
-                recipient as *mut u128 as *mut u8,
+                sender as *mut u128 as *mut u8,
                 16,
             )),
             IoVec::from_mut_slice(std::slice::from_raw_parts_mut(

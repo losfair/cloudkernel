@@ -8,9 +8,9 @@ extern crate lazy_static;
 
 pub mod hook;
 pub mod ipc;
-pub mod net;
 pub mod poll;
 pub mod process;
 pub mod snapshot;
 pub mod tangle;
 pub mod timer;
+pub mod ip;

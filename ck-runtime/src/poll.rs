@@ -113,9 +113,6 @@ fn handle_kernel_message(session: u64, tag: u32, data: &mut [u8]) {
     };
 
     match tag {
-        KernelMessageType::IP_PACKET => {
-            crate::net::ip_input(data);
-        }
         _ => {
             println!("Unknown tag: {:?}", tag);
         }
