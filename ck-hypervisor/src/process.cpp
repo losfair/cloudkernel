@@ -262,7 +262,38 @@ static int child_start(void *arg) {
   abort();
 }
 
+static void insert_route(__uint128_t ck_pid, IPAddress unified_addr) {
+  auto ep = std::shared_ptr<RoutingEndpoint>(new RoutingEndpoint);
+  ep->ck_pid = ck_pid;
+  ep->on_packet = [unified_addr, ck_pid](uint8_t *packet, size_t len) {
+    if(auto proc = global_process_set.get_process(ck_pid)) {
+      proc->input_ip_packet(packet, len);
+    } else {
+      global_router.unregister_route(unified_addr, ck_pid);
+    }
+  };
+  global_router.register_route(unified_addr, std::move(ep));
+}
+
+void Process::input_ip_packet(const uint8_t *data, size_t len) {
+  std::lock_guard<std::mutex> lg(ip_queue_mu);
+  if(ip_send_queue && ip_send_queue->can_push()) {
+    uint8_t *place = ip_send_queue->get_data_ptr();
+    size_t send_len = len < SharedQueue::data_size() ? len : SharedQueue::data_size();
+    std::copy(data, data + send_len, place);
+    ip_send_queue->push(send_len);
+  }
+  // drop otherwise
+}
+
 void Process::run() {
+  if(profile->ipv4_address) {
+    __uint128_t unified_addr =  ((__uint128_t)0xffff00000000ull) | (__uint128_t) *profile->ipv4_address;
+    insert_route(ck_pid, unified_addr);
+  }
+  if(profile->ipv6_address) {
+    insert_route(ck_pid, *profile->ipv6_address);
+  }
   int sockets[2];
 
   if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) < 0) {
@@ -376,7 +407,6 @@ Process::~Process() {
     std::lock_guard<std::mutex> lg(ip_queue_mu);
     if(ip_recv_queue) {
       ip_recv_queue->request_termination();
-      tgkill(getpid(), ip_recv_queue_worker_tid, SIGUSR1);
       ip_recv_queue_worker.join();
     }
   }
@@ -1151,20 +1181,6 @@ void Process::insert_fd(int fd, const std::filesystem::path &path, int flags) {
   desc->path = path;
   desc->flags = flags;
   io_map.insert_file_description(fd, std::move(desc));
-}
-
-void Process::run_ip_recv_queue_worker() {
-  while(true) {
-    bool ok = ip_recv_queue->wait_pop();
-    if(!ok) {
-      // termination requested
-      printf("Termination requested, exiting IP recv queue worker\n");
-      break;
-    }
-    size_t size = ip_recv_queue->current_len();
-    if(size) global_router.dispatch_packet(ip_recv_queue->get_data_ptr(), size);
-    ip_recv_queue->pop();
-  }
 }
 
 ProcessSet::ProcessSet() : pid_rand_gen(pid_rand_dev()) {}

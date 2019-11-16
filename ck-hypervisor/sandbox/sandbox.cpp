@@ -319,6 +319,7 @@ static void init_seccomp_rules() {
   SCMP_SETUP_FILE_IO(ctx, getsockopt);
   SCMP_SETUP_FILE_IO(ctx, setsockopt);
   SCMP_SETUP_FILE_IO(ctx, accept);
+  SCMP_SETUP_FILE_IO(ctx, accept4);
   SCMP_SETUP_FILE_IO(ctx, connect);
   SCMP_SETUP_FILE_IO(ctx, listen);
   SCMP_SETUP_FILE_IO(ctx, bind);

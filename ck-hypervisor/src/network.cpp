@@ -172,10 +172,14 @@ bool SharedQueue::wait_pop() {
   SharedQueueElement *element = &elements[next_element];
   while(!element->filled.load()) {
     if(termination_requested.load()) return false;
-    int code = futex((int *) &element->filled, FUTEX_WAIT, 0, nullptr, nullptr, 0);
+    timespec timeout = {
+      .tv_sec = 0,
+      .tv_nsec = 100 * 1000 * 1000, // 100 ms
+    };
+    int code = futex((int *) &element->filled, FUTEX_WAIT, 0, &timeout, nullptr, 0);
     int err = errno;
     if(code == 0) continue;
-    if(code == -1 && (err == EINTR || err == EAGAIN)) continue;
+    if(code == -1 && (err == EINTR || err == EAGAIN || err == ETIMEDOUT)) continue;
     throw std::logic_error("unexpected result from futex(FUTEX_WAIT)");
   }
   return true;

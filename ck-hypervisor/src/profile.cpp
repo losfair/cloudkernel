@@ -26,6 +26,7 @@ bool GlobalProfile::parse(const std::string &_input) {
     }
     auto raw_apps = input["apps"].get<std::map<std::string, json>>();
     for (auto &[k, v] : raw_apps) {
+      if(auto disabled = v["disabled"]; !disabled.is_null() && disabled.get<bool>() == true) continue;
       auto p = std::shared_ptr<AppProfile>(new AppProfile);
       p->name = k;
       p->args = v["args"].get<std::vector<std::string>>();

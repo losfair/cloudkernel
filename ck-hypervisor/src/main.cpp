@@ -16,12 +16,10 @@
 static std::atomic<bool> got_interrupt(false);
 
 void handle_interrupt(int signo) { got_interrupt.store(true); }
-void handle_sigusr1(int signo) {}
 
 int main(int argc, const char *argv[]) {
   signal(SIGINT, handle_interrupt);
   signal(SIGTERM, handle_interrupt);
-  signal(SIGUSR1, handle_sigusr1); // "explicitly" ignore to ensure EINTR delivery.
 
   if (const char *config_path = getenv("CK_CONFIG")) {
     std::ifstream config_file(config_path);

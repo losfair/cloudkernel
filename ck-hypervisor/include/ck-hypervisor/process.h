@@ -112,7 +112,6 @@ private:
   std::mutex ip_queue_mu;
   std::unique_ptr<SharedQueue> ip_recv_queue, ip_send_queue;
   std::thread ip_recv_queue_worker;
-  int ip_recv_queue_worker_tid = -1;
 
   void serve_sandbox();
   void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data,
@@ -139,7 +138,6 @@ private:
   void insert_fd(int fd, const std::filesystem::path &path, int flags);
   std::optional<std::vector<std::string>> read_string_vec(uint32_t count,
                                                           unsigned long rptr);
-  void run_ip_recv_queue_worker();
 
 public:
   ck_pid_t ck_pid = 0, parent_ck_pid = 0;
@@ -154,6 +152,7 @@ public:
   void add_awaiter(std::function<void()> &&awaiter);
   void kill_async();
   bool has_capability(const char *cap);
+  void input_ip_packet(const uint8_t *data, size_t len);
 
   friend class Thread;
 };

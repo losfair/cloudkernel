@@ -39,6 +39,20 @@ static void send_invalid(int socket) {
   msg.send(socket);
 }
 
+static void run_ip_recv_queue_worker(SharedQueue &q) {
+  while(true) {
+    bool ok = q.wait_pop();
+    if(!ok) {
+      // termination requested
+      printf("Termination requested, exiting IP recv queue worker\n");
+      break;
+    }
+    size_t size = q.current_len();
+    if(size) global_router.dispatch_packet(q.get_data_ptr(), size);
+    q.pop();
+  }
+}
+
 void Process::handle_kernel_message(uint64_t session, MessageType tag,
                                     uint8_t *data, size_t rem) {
   if (session != 0) {
@@ -310,13 +324,9 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
         ok = false;
         break;
       }
-      auto worker_tid = std::unique_ptr<std::promise<int>>(new std::promise<int>);
-      std::future<int> worker_tid_fut = worker_tid->get_future();
-      ip_recv_queue_worker = std::thread([this, worker_tid(std::move(worker_tid))]() {
-        worker_tid->set_value(gettid());
-        run_ip_recv_queue_worker();
+      ip_recv_queue_worker = std::thread([this]() {
+        run_ip_recv_queue_worker(*ip_recv_queue);
       });
-      ip_recv_queue_worker_tid = worker_tid_fut.get();
 
       int fd = ip_recv_queue->shm.create_remote_handle(); // tx
       if(fd < 0) {
