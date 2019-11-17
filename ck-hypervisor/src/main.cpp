@@ -46,8 +46,6 @@ int main(int argc, const char *argv[]) {
   }
 
   global_registry.set_prefix(global_profile.module_path.c_str());
-  global_router.setup_tun();
-  std::thread([]() { global_router.run_loop(); }).detach();
 
   {
     std::shared_lock<std::shared_mutex> lg(global_profile_mu);

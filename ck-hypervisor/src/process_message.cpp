@@ -44,7 +44,6 @@ static void run_ip_recv_queue_worker(SharedQueue &q) {
     bool ok = q.wait_pop();
     if (!ok) {
       // termination requested
-      printf("Termination requested, exiting IP recv queue worker\n");
       break;
     }
     size_t size = q.current_len();

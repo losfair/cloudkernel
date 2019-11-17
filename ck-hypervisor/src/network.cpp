@@ -1,3 +1,5 @@
+#include <ck-hypervisor/byteutils.h>
+#include <ck-hypervisor/external.h>
 #include <ck-hypervisor/network.h>
 #include <fcntl.h>
 #include <iostream>
@@ -5,6 +7,7 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <stdint.h>
 #include <string.h>
@@ -12,9 +15,14 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <thread>
 #include <unistd.h>
 
-Router global_router;
+static const char *dev_name = "tun-cloudkernel";
+
+// Seems that using more than one tx/rx queues does not improve throughput.
+// (mutex contention?)
+Router global_router(1);
 
 static std::optional<IPAddress>
 extract_destination_address_from_packet(const uint8_t *data, size_t len) {
@@ -40,17 +48,71 @@ extract_destination_address_from_packet(const uint8_t *data, size_t len) {
   }
 }
 
+Router::Router(int n_threads) {
+  if (n_threads <= 0) {
+    throw std::runtime_error("n_threads must be greater than zero");
+  }
+
+  for (int i = 0; i < n_threads; i++) {
+    auto tun = std::unique_ptr<Tun>(new Tun(dev_name, true));
+    tuns.push_back(std::move(tun));
+  }
+
+  if (call_external("ip", {"ip", "link", "set", dev_name, "up"}) != 0) {
+    throw std::runtime_error("Unable to set link to up");
+  }
+
+  for (auto &t : tuns) {
+    Tun *dev = &*t;
+    std::thread([this, dev]() { run_loop(dev); }).detach();
+  }
+}
+
+static thread_local std::random_device rand_dev;
+static thread_local std::mt19937 rand_gen = std::mt19937(rand_dev());
+
+static inline bool is_ipv4_address(IPAddress addr) {
+  return (addr >> 32 == 0xffff);
+}
+
+static void update_os_route(IPAddress addr, const char *action) {
+  if (is_ipv4_address(addr)) {
+    std::string fmt = encode_ipv4_address((uint32_t)addr);
+    if (call_external(
+            "ip", {"ip", "route", action, fmt.c_str(), "dev", dev_name}) != 0) {
+      printf("Unable to update IPv4 route\n");
+    }
+  } else {
+    std::string fmt = encode_ipv6_address(addr);
+    if (call_external("ip", {"ip", "-6", "route", action, fmt.c_str(), "dev",
+                             dev_name}) != 0) {
+      printf("Unable to update IPv6 route\n");
+    }
+  }
+}
+
+Tun *Router::choose_tun() {
+  std::uniform_int_distribution<uint64_t> dist(0, tuns.size() - 1);
+  return &*tuns.at(dist(rand_gen));
+}
+
 void Router::register_route(IPAddress addr,
                             std::shared_ptr<RoutingEndpoint> &&endpoint) {
-  std::lock_guard<std::mutex> lg(mu);
+  std::unique_lock<std::shared_mutex> lg(routes_mu);
+  bool existed_before = routes.find(addr) != routes.end();
   routes[addr] = std::move(endpoint);
+
+  if (!existed_before) {
+    update_os_route(addr, "add");
+  }
 }
 
 void Router::unregister_route(IPAddress addr, __uint128_t ck_pid) {
-  std::lock_guard<std::mutex> lg(mu);
+  std::unique_lock<std::shared_mutex> lg(routes_mu);
   if (auto it = routes.find(addr);
       it != routes.end() && it->second->ck_pid == ck_pid) {
     routes.erase(it);
+    update_os_route(addr, "del");
   }
 }
 
@@ -65,26 +127,25 @@ void Router::dispatch_packet(uint8_t *data, size_t len) {
   std::shared_ptr<RoutingEndpoint> endpoint;
 
   {
-    std::lock_guard<std::mutex> lg(mu);
+    std::shared_lock<std::shared_mutex> lg(routes_mu);
     if (auto it = routes.find(addr); it != routes.end()) {
       endpoint = it->second;
     }
   }
 
   if (endpoint) {
-    std::lock_guard<std::mutex> lg(endpoint->mu);
     if (endpoint->on_packet)
       endpoint->on_packet(data, len);
   } else {
-    tun->write(data, len); // packet to outside
+    choose_tun()->write(data, len); // packet to outside
   }
 }
 
-void Router::run_loop() {
+void Router::run_loop(Tun *dev) {
   uint8_t buf[1500];
 
   while (true) {
-    int n = tun->read(buf, sizeof(buf));
+    int n = dev->read(buf, sizeof(buf));
     if (n <= 0) {
       std::cout << "tun->read() failed: " << n << std::endl;
       continue;
@@ -93,7 +154,7 @@ void Router::run_loop() {
   }
 }
 
-Tun::Tun(const char *name) {
+Tun::Tun(const char *name, bool multiqueue) {
   int fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
   if (fd < 0) {
     throw std::runtime_error("cannot open tun device");
@@ -102,6 +163,8 @@ Tun::Tun(const char *name) {
   ifreq ifr;
   memset((char *)&ifr, 0, sizeof(ifr));
   ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+  if (multiqueue)
+    ifr.ifr_flags |= IFF_MULTI_QUEUE;
 
   if (name) {
     strncpy(ifr.ifr_name, name, IFNAMSIZ);
@@ -110,11 +173,6 @@ Tun::Tun(const char *name) {
   if (ioctl(fd, TUNSETIFF, (void *)&ifr) < 0) {
     close(fd);
     throw std::runtime_error("cannot set ifreq");
-  }
-
-  if (ioctl(fd, TUNSETPERSIST, 1) < 0) {
-    close(fd);
-    throw std::runtime_error("cannot set persist");
   }
 
   this->fd = fd;

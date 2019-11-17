@@ -2,6 +2,7 @@
 #include <chrono>
 #include <ck-hypervisor/byteutils.h>
 #include <ck-hypervisor/config.h>
+#include <ck-hypervisor/external.h>
 #include <ck-hypervisor/linking.h>
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/network.h>
@@ -28,6 +29,7 @@
 #include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -36,18 +38,9 @@
 
 static const bool permissive_mode = false;
 
-static int call_external(const char *cmd, std::vector<const char *> args) {
-  args.push_back(nullptr);
+static int forked_setuid(uid_t uid) { return syscall(__NR_setuid, uid); }
 
-  int pid = -1, wstatus = -1;
-  if ((pid = fork()) == 0) {
-    execvp(cmd, (char *const *)&args[0]);
-    _exit(1);
-  }
-  if (waitpid(pid, &wstatus, 0) < 0)
-    return -1;
-  return WEXITSTATUS(wstatus);
-}
+static int forked_setgid(gid_t gid) { return syscall(__NR_setgid, gid); }
 
 void Process::run_as_child(int socket) {
   personality(ADDR_NO_RANDOMIZE); // snapshoting requires deterministic address
@@ -93,17 +86,17 @@ void Process::run_as_child(int socket) {
   }
 
   Tun tun("access");
-  if (call_external("ip", {"ip", "link", "set", "access", "up"}) != 0 ||
-      call_external("ip", {"ip", "route", "add", "default", "dev", "access"}) !=
-          0 ||
-      call_external("ip", {"ip", "-6", "route", "add", "default", "dev",
-                           "access"}) != 0) {
+  if (forked_call_external("ip", {"ip", "link", "set", "access", "up"}) != 0 ||
+      forked_call_external(
+          "ip", {"ip", "route", "add", "default", "dev", "access"}) != 0 ||
+      forked_call_external("ip", {"ip", "-6", "route", "add", "default", "dev",
+                                  "access"}) != 0) {
     printf("unable to configure interface\n");
     exit(1);
   }
   if (profile->ipv4_address) {
     auto addr = encode_ipv4_address(*profile->ipv4_address);
-    if (call_external(
+    if (forked_call_external(
             "ip", {"ip", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
       printf("unable to set ipv4 address\n");
       exit(1);
@@ -111,8 +104,8 @@ void Process::run_as_child(int socket) {
   }
   if (profile->ipv6_address) {
     auto addr = encode_ipv6_address(*profile->ipv6_address);
-    if (call_external("ip", {"ip", "-6", "addr", "add", addr.c_str(), "dev",
-                             "access"}) != 0) {
+    if (forked_call_external("ip", {"ip", "-6", "addr", "add", addr.c_str(),
+                                    "dev", "access"}) != 0) {
       printf("unable to set ipv6 address\n");
       exit(1);
     }
@@ -164,12 +157,9 @@ void Process::run_as_child(int socket) {
   else
     chdir("/");
 
-  if (setgid(65534) != 0 || setuid(65534) != 0) {
+  if (forked_setgid(65534) != 0 || forked_setuid(65534) != 0) {
     printf("unable to drop permissions\n");
-    if (getuid() == 0) {
-      printf("cannot continue as root.\n");
-      exit(1);
-    }
+    exit(1);
   }
 
   std::vector<char *> envp;
@@ -322,9 +312,15 @@ void Process::run() {
     __uint128_t unified_addr =
         ((__uint128_t)0xffff00000000ull) | (__uint128_t)*profile->ipv4_address;
     insert_route(ck_pid, unified_addr);
+    add_awaiter([ck_pid(this->ck_pid), unified_addr]() {
+      global_router.unregister_route(unified_addr, ck_pid);
+    });
   }
   if (profile->ipv6_address) {
     insert_route(ck_pid, *profile->ipv6_address);
+    add_awaiter([ck_pid(this->ck_pid), unified_addr(*profile->ipv6_address)]() {
+      global_router.unregister_route(unified_addr, ck_pid);
+    });
   }
   int sockets[2];
 
