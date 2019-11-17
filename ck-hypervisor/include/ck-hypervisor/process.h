@@ -2,12 +2,10 @@
 
 #include <atomic>
 #include <ck-hypervisor/bqueue.h>
-#include <ck-hypervisor/iomap.h>
 #include <ck-hypervisor/message.h>
 #include <ck-hypervisor/network.h>
 #include <ck-hypervisor/owned_message.h>
 #include <ck-hypervisor/profile.h>
-#include <ck-hypervisor/snapshot.h>
 #include <functional>
 #include <future>
 #include <map>
@@ -38,11 +36,6 @@ enum class SandboxState {
   IN_SANDBOX,
 };
 
-enum class SyscallFixupMethod {
-  SET_VALUE,
-  SEND_SIGSYS,
-};
-
 using DeferredSyscallHandler = std::function<bool(user_regs_struct &)>;
 
 struct RegisterDumpState {
@@ -61,21 +54,15 @@ private:
 
   Thread() {}
   void run_ptrace_monitor();
-  bool
-  register_returned_fd_after_syscall(user_regs_struct &regs,
-                                     const std::filesystem::path &parent_path,
-                                     const std::string &path, int flags);
   TraceContinuationState handle_syscall(user_regs_struct regs, int &sig);
   TraceContinuationState handle_signal(user_regs_struct regs, int &sig);
   TraceContinuationState handle_new_thread();
   std::optional<std::string> read_c_string(unsigned long remote_addr,
                                            size_t max_size);
-  std::shared_ptr<FileDescription> map_fd_param0(
-      user_regs_struct &regs, bool &is_invalid,
-      SyscallFixupMethod &fixup_method, int64_t &replace_value,
-      std::vector<DeferredSyscallHandler> &deferred,
-      std::function<void(std::shared_ptr<FileDescription> &)> preprocess =
-          nullptr);
+  bool read_memory(unsigned long remote_addr, size_t len, uint8_t *data);
+  bool write_memory(unsigned long remote_addr, size_t len, const uint8_t *data);
+  std::optional<std::vector<std::string>> read_string_vec(uint32_t count,
+                                                          unsigned long rptr);
 
 public:
   Thread(const Thread &that) = delete;
@@ -100,9 +87,6 @@ private:
   BQueue<OwnedMessage> pending_messages;
   std::atomic<SandboxState> sandbox_state =
       std::atomic<SandboxState>(SandboxState::NONE);
-  IOMap io_map;
-  std::atomic<bool> notify_invalid_syscall = std::atomic<bool>(false);
-  std::atomic<bool> allow_snapshot = std::atomic<bool>(true);
   std::string image_type;
   std::mutex threads_mu;
   std::map<int, std::unique_ptr<Thread>> threads;
@@ -116,28 +100,6 @@ private:
   void serve_sandbox();
   void handle_kernel_message(uint64_t session, MessageType tag, uint8_t *data,
                              size_t rem);
-  bool read_memory(unsigned long remote_addr, size_t len, uint8_t *data);
-  template <class T>
-  std::optional<T> read_memory_typed(unsigned long remote_addr) {
-    static_assert(std::is_trivial<T>::value,
-                  "read_memory_typed only accepts trivial types");
-    T ret;
-    if (read_memory(remote_addr, sizeof(T), (uint8_t *)&ret))
-      return ret;
-    else
-      return std::nullopt;
-  }
-  bool write_memory(unsigned long remote_addr, size_t len, const uint8_t *data);
-  template <class T>
-  bool write_memory_typed(unsigned long remote_addr, const T &data) {
-    static_assert(std::is_trivial<T>::value,
-                  "write_memory_typed only accepts trivial types");
-    return write_memory(remote_addr, sizeof(T), (const uint8_t *)&data);
-  }
-  std::shared_ptr<std::vector<uint8_t>> take_snapshot();
-  void insert_fd(int fd, const std::filesystem::path &path, int flags);
-  std::optional<std::vector<std::string>> read_string_vec(uint32_t count,
-                                                          unsigned long rptr);
 
 public:
   ck_pid_t ck_pid = 0, parent_ck_pid = 0;
@@ -186,6 +148,11 @@ public:
 };
 
 extern ProcessSet global_process_set;
+
+bool read_process_memory(int pid, unsigned long remote_addr,
+                                size_t len, uint8_t *data);
+bool write_process_memory(int pid, unsigned long remote_addr,
+                                 size_t len, const uint8_t *data);
 
 static inline std::string stringify_ck_pid(ck_pid_t pid) {
   const uint8_t *pid_bytes = (const uint8_t *)&pid;

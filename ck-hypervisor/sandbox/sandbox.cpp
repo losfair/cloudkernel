@@ -27,74 +27,12 @@
 #include <sys/user.h>
 #include <unistd.h>
 
-#include "cc.h"
-#include "snapshot_parser.h"
+using ck_pid_t = __uint128_t;
 
 int hypervisor_fd = -1;
-uint8_t __attribute__((aligned(16))) launchpad_stack[65536 * 16];
-uint8_t *mmap_end = (uint8_t *)CK_LOADER_MMAP_BASE;
-
-static long __attribute__((naked)) enter_sandbox() {
-  asm("movq $" _STR(CK_SYS_ENTER_SANDBOX) ", %rax\n"
-                                          "syscall\n"
-                                          "ret\n");
-}
-
-static void __attribute__((naked, noreturn))
-invoke_noreturn_on_stack(void *stack, void *f, void *userdata) {
-  asm("movq %rdi, %rsp\n"
-      "movq %rdx, %rdi\n"
-      "pushq $0\n" // return address = nullptr
-      "jmpq *%rsi\n");
-}
-
-static long __attribute__((naked, noreturn))
-load_processor_state_and_unmap_loader(user_regs_struct *regs) {
-  asm("movq $" _STR(CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER) ", %rax\n"
-                                                                  "syscall\n"
-                                                                  "ud2\n");
-}
-
-struct SnapshotInvocationContext {
-  int mfd;
-  void *image_mapping;
-  size_t image_size;
-};
-
-// FIXME: Currently this does not handle multithreaded snapshots correctly.
-void invoke_snapshot(SnapshotInvocationContext *ctx) {
-  static std::array<user_regs_struct, 1024> thread_regs;
-  int n_threads = load_snapshot(
-      ctx->mfd, (const uint8_t *)ctx->image_mapping, ctx->image_size,
-      thread_regs); // `ctx` becomes invalid after this
-  for (int i = 1; i < n_threads; i++) {
-    const int stack_size = 4096;
-    void *stack = mmap((void *)mmap_end, stack_size, PROT_READ,
-                       MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-    if (stack == MAP_FAILED) {
-      printf("STACK MAP FAILED\n");
-      abort();
-    }
-    mmap_end += stack_size;
-    if (clone((int (*)(void *))load_processor_state_and_unmap_loader, stack,
-              CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
-                  CLONE_SYSVSEM,
-              (void *)&thread_regs[i]) < 0) {
-      printf("CLONE FAILED\n");
-      abort();
-    }
-  }
-  load_processor_state_and_unmap_loader(&thread_regs[0]);
-}
-
-struct MapInfo {
-  std::string full_name;
-  unsigned long size;
-};
 
 struct SharedModule {
   int mfd = -1;
-  void *image_mapping = nullptr;
   std::string full_name;
   size_t image_size = 0;
   std::string module_type;
@@ -128,16 +66,6 @@ struct SharedModule {
       execv(mfd_path.c_str(), (char *const *)argv);
       std::cout << "execv() failed" << std::endl;
       _exit(1);
-    } else if (module_type == "snapshot") {
-      enter_sandbox();
-      SnapshotInvocationContext ctx = {
-          .mfd = mfd,
-          .image_mapping = image_mapping,
-          .image_size = image_size,
-      };
-      invoke_noreturn_on_stack(
-          (void *)(launchpad_stack + sizeof(launchpad_stack)),
-          (void *)invoke_snapshot, (void *)&ctx);
     }
     abort();
   }
@@ -205,14 +133,6 @@ struct SharedModule {
 
         if (this->image_size == 0)
           throw std::runtime_error("!!! image_size is zero");
-
-        image_mapping = mmap((void *)mmap_end, this->image_size, PROT_READ,
-                             MAP_PRIVATE | MAP_FIXED, mfd, 0);
-        if (image_mapping == MAP_FAILED) {
-          printf("MAP_FAILED: %s\n", strerror(errno));
-          throw std::runtime_error("failed to map image into memory");
-        }
-        mmap_end += round_up(this->image_size, 4096);
       } else {
         throw std::runtime_error("unexpected message type from hypervisor");
       }
@@ -222,6 +142,9 @@ struct SharedModule {
 
 static SharedModule init_mod;
 
+#define SCMP_SETUP_FILE_IO(ctx, name) seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 0)
+
+/*
 #define SCMP_SETUP_FILE_IO(ctx, name)                                          \
   {                                                                            \
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 1,                   \
@@ -232,7 +155,7 @@ static SharedModule init_mod;
                      SCMP_A0(SCMP_CMP_GE, 0x80000000),                         \
                      SCMP_A0(SCMP_CMP_LE, 0xefffffff));                        \
   }
-
+*/
 static void init_seccomp_rules() {
   scmp_filter_ctx ctx;
   ctx = seccomp_init(SCMP_ACT_TRACE(1));
@@ -295,7 +218,18 @@ static void init_seccomp_rules() {
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(readlink), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getcwd), 0);
 
+  // file open/creation/close
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(open), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(epoll_create), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(epoll_create1), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(socket), 0);
+
   // General I/O.
+  SCMP_SETUP_FILE_IO(ctx, dup3);
+  SCMP_SETUP_FILE_IO(ctx, dup2);
+  SCMP_SETUP_FILE_IO(ctx, dup);
+  SCMP_SETUP_FILE_IO(ctx, close);
+  SCMP_SETUP_FILE_IO(ctx, openat);
   SCMP_SETUP_FILE_IO(ctx, lseek);
   SCMP_SETUP_FILE_IO(ctx, write);
   SCMP_SETUP_FILE_IO(ctx, read);
@@ -315,13 +249,11 @@ static void init_seccomp_rules() {
   SCMP_SETUP_FILE_IO(ctx, getdents64);
 
   // Epoll.
-  // epoll_create()/epoll_create1() invalidate the snapshot state.
   SCMP_SETUP_FILE_IO(ctx, epoll_wait);
   SCMP_SETUP_FILE_IO(ctx, epoll_ctl);
   SCMP_SETUP_FILE_IO(ctx, epoll_pwait);
 
   // Sockets.
-  // socket() invalidates the snapshot state.
   SCMP_SETUP_FILE_IO(ctx, getsockopt);
   SCMP_SETUP_FILE_IO(ctx, setsockopt);
   SCMP_SETUP_FILE_IO(ctx, accept);

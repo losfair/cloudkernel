@@ -14,11 +14,6 @@ static int send_ok(int socket) {
   return result.kernel_message().send(socket);
 }
 
-static int send_ok(int socket, const char *description) {
-  TrivialResult result(0, description);
-  return result.kernel_message().send(socket);
-}
-
 static int send_reject(int socket) {
   TrivialResult result(-1, "");
   return result.kernel_message().send(socket);
@@ -51,6 +46,32 @@ static void run_ip_recv_queue_worker(SharedQueue &q) {
       global_router.dispatch_packet(q.get_data_ptr(), size);
     q.pop();
   }
+}
+
+static std::optional<std::vector<std::string>> read_string_vec(int pid, uint32_t count, unsigned long rptr) {
+  if (count == 0)
+    return std::vector<std::string>();
+
+  if (count > 256) {
+    return std::nullopt;
+  }
+
+  std::vector<RemoteString> rs(count);
+  if (!read_process_memory(pid, rptr, rs.size() * sizeof(RemoteString), (uint8_t *)&rs[0])) {
+    return std::nullopt;
+  }
+
+  std::vector<std::string> strings(rs.size());
+  for (size_t i = 0; i < rs.size(); i++) {
+    if (rs[i].len > 65536) {
+      return std::nullopt;
+    }
+    if (rs[i].len == 0)
+      continue;
+    strings[i] = std::string(rs[i].len, '\0');
+    read_process_memory(pid, rs[i].rptr, rs[i].len, (uint8_t *)&strings[i][0]);
+  }
+  return std::move(strings);
 }
 
 void Process::handle_kernel_message(uint64_t session, MessageType tag,
@@ -132,20 +153,20 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
     std::shared_ptr<AppProfile> new_profile(new AppProfile);
 
     {
-      auto maybe_argv = read_string_vec(info.argc, info.argv);
+      auto maybe_argv = read_string_vec(os_pid, info.argc, info.argv);
       if (!maybe_argv) {
         send_reject(socket, "unable to read arguments");
         break;
       }
 
-      auto maybe_caps = read_string_vec(info.n_capabilities, info.capabilities);
+      auto maybe_caps = read_string_vec(os_pid, info.n_capabilities, info.capabilities);
       if (!maybe_caps) {
         send_reject(socket, "unable to read capabilities");
         break;
       }
 
       auto maybe_storage_groups =
-          read_string_vec(info.n_storage_groups, info.storage_groups);
+          read_string_vec(os_pid, info.n_storage_groups, info.storage_groups);
       if (!maybe_storage_groups) {
         send_reject(socket, "unable to read storage groups");
         break;
@@ -249,45 +270,6 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
     }
     break;
   }
-  case MessageType::SNAPSHOT_CREATE: {
-    if (rem != sizeof(__uint128_t)) {
-      send_reject(socket, "invalid pid size");
-      break;
-    }
-
-    __uint128_t pid = *(__uint128_t *)data;
-    auto target_proc = global_process_set.get_process(pid);
-    if (!target_proc) {
-      send_reject(socket, "process not found");
-      break;
-    }
-
-    auto snapshot = target_proc->take_snapshot();
-    if (!snapshot) {
-      send_reject(socket, "unable to take snapshot");
-      break;
-    }
-
-    std::vector<uint8_t> snapshot_hash_bytes(picosha2::k_digest_size);
-    picosha2::hash256(snapshot->begin(), snapshot->end(),
-                      snapshot_hash_bytes.begin(), snapshot_hash_bytes.end());
-
-    std::string snapshot_name = "snapshot:";
-    snapshot_name += picosha2::bytes_to_hex_string(snapshot_hash_bytes.begin(),
-                                                   snapshot_hash_bytes.end());
-
-    try {
-      global_registry.save_module(snapshot_name.c_str(), std::nullopt,
-                                  "snapshot", &(*snapshot)[0],
-                                  snapshot->size());
-    } catch (std::runtime_error &e) {
-      send_reject(socket, "unable to save snapshot");
-      break;
-    }
-
-    send_ok(socket, snapshot_name.c_str());
-    break;
-  }
   case MessageType::IP_QUEUE_OPEN: {
     if (rem != sizeof(uint32_t)) {
       send_reject(socket, "invalid request size");
@@ -358,31 +340,4 @@ void Process::handle_kernel_message(uint64_t session, MessageType tag,
   default:
     break; // invalid tag
   }
-}
-
-std::optional<std::vector<std::string>>
-Process::read_string_vec(uint32_t count, unsigned long rptr) {
-  if (count == 0)
-    return std::vector<std::string>();
-
-  if (count > 256) {
-    return std::nullopt;
-  }
-
-  std::vector<RemoteString> rs(count);
-  if (!read_memory(rptr, rs.size() * sizeof(RemoteString), (uint8_t *)&rs[0])) {
-    return std::nullopt;
-  }
-
-  std::vector<std::string> strings(rs.size());
-  for (size_t i = 0; i < rs.size(); i++) {
-    if (rs[i].len > 65536) {
-      return std::nullopt;
-    }
-    if (rs[i].len == 0)
-      continue;
-    strings[i] = std::string(rs[i].len, '\0');
-    read_memory(rs[i].rptr, rs[i].len, (uint8_t *)&strings[i][0]);
-  }
-  return std::move(strings);
 }

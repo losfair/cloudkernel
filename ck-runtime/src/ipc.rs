@@ -21,7 +21,6 @@ pub enum KernelMessageType {
     PROCESS_OFFER,
     PROCESS_WAIT,
     POLL,
-    SNAPSHOT_CREATE,
     PROCESS_COMPLETION,
     IP_QUEUE_OPEN,
     IP_QUEUE_OFFER,

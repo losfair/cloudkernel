@@ -54,14 +54,6 @@ static ModuleHandle *try_open_module(const std::filesystem::path &prefix,
     }
   }
 
-  {
-    std::filesystem::path full_path = prefix;
-    full_path /= std::string(name) + ".snapshot";
-    if (int fd = open(full_path.c_str(), O_RDONLY | O_CLOEXEC); fd >= 0) {
-      return new ModuleHandle(fd, "snapshot");
-    }
-  }
-
   return nullptr;
 }
 std::unique_ptr<ModuleHandle> Registry::get_module(const char *name,

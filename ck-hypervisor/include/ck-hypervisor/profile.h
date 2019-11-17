@@ -14,7 +14,6 @@ Capabilities:
 - socket_listen.<port>
 - socket_connect
 - profile_update
-- snapshot_create
 - process_create
 - network_assign_ipv4
 */

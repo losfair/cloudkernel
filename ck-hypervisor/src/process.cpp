@@ -36,15 +36,11 @@
 #include <thread>
 #include <unistd.h>
 
-static const bool permissive_mode = false;
-
 static int forked_setuid(uid_t uid) { return syscall(__NR_setuid, uid); }
 
 static int forked_setgid(gid_t gid) { return syscall(__NR_setgid, gid); }
 
 void Process::run_as_child(int socket) {
-  personality(ADDR_NO_RANDOMIZE); // snapshoting requires deterministic address
-                                  // space layout
   if (socket != 3) {
     if (dup2(socket, 3) < 0) {
       printf("cannot duplicate socket fd\n");
@@ -186,7 +182,6 @@ void Process::run_as_child(int socket) {
 }
 
 Process::Process(std::shared_ptr<AppProfile> profile) {
-  io_map.setup_defaults();
   pending_messages.set_capacity(1024);
 
   if (profile->args.size() == 0) {
@@ -206,7 +201,7 @@ Process::Process(std::shared_ptr<AppProfile> profile) {
   }
 }
 
-static bool read_process_memory(int os_pid, unsigned long remote_addr,
+bool read_process_memory(int pid, unsigned long remote_addr,
                                 size_t len, uint8_t *data) {
   if (len == 0)
     return true;
@@ -219,13 +214,13 @@ static bool read_process_memory(int os_pid, unsigned long remote_addr,
       .iov_base = (void *)remote_addr,
       .iov_len = len,
   };
-  if (process_vm_readv(os_pid, &local_iov, 1, &remote_iov, 1, 0) != len)
+  if (process_vm_readv(pid, &local_iov, 1, &remote_iov, 1, 0) != len)
     return false;
   else
     return true;
 }
 
-static bool write_process_memory(int os_pid, unsigned long remote_addr,
+bool write_process_memory(int pid, unsigned long remote_addr,
                                  size_t len, const uint8_t *data) {
   if (len == 0)
     return true;
@@ -238,7 +233,7 @@ static bool write_process_memory(int os_pid, unsigned long remote_addr,
       .iov_base = (void *)remote_addr,
       .iov_len = len,
   };
-  if (process_vm_writev(os_pid, &local_iov, 1, &remote_iov, 1, 0) != len)
+  if (process_vm_writev(pid, &local_iov, 1, &remote_iov, 1, 0) != len)
     return false;
   else
     return true;
@@ -266,14 +261,14 @@ static void print_regs(const user_regs_struct &regs) {
   printf("gs_base: %p\n", (void *)regs.gs_base);
 }
 
-bool Process::read_memory(unsigned long remote_addr, size_t len,
+bool Thread::read_memory(unsigned long remote_addr, size_t len,
                           uint8_t *data) {
-  return read_process_memory(os_pid, remote_addr, len, data);
+  return read_process_memory(os_tid, remote_addr, len, data);
 }
 
-bool Process::write_memory(unsigned long remote_addr, size_t len,
+bool Thread::write_memory(unsigned long remote_addr, size_t len,
                            const uint8_t *data) {
-  return write_process_memory(os_pid, remote_addr, len, data);
+  return write_process_memory(os_tid, remote_addr, len, data);
 }
 
 static int child_start(void *arg) {
@@ -476,181 +471,6 @@ Process::~Process() {
 void Process::add_awaiter(std::function<void()> &&awaiter) {
   std::lock_guard<std::mutex> lg(awaiters_mu);
   awaiters.push_back(std::move(awaiter));
-}
-
-static std::optional<std::vector<MemoryRangeSnapshot>>
-take_memory_snapshot(int os_pid) {
-  std::stringstream name_ss;
-  name_ss << "/proc/" << os_pid << "/maps";
-  std::string name = name_ss.str();
-
-  std::ifstream maps(name.c_str());
-  if (!maps) {
-    return std::nullopt;
-  }
-
-  std::regex re(
-      "([0-9a-f]+)-([0-9a-f]+) (....) ([0-9a-f]+) (..):(..) ([0-9]+)( *)(.*)");
-  std::vector<MemoryRangeSnapshot> result;
-
-  while (!maps.eof()) {
-    std::string line;
-    std::getline(maps, line);
-
-    std::cmatch cm;
-    if (!std::regex_match(line.c_str(), cm, re)) {
-      break;
-    } else {
-      if (cm.size() != 10) {
-        printf("take_memory_snapshot: unexpected match size\n");
-        return std::nullopt;
-      }
-
-      uint64_t start = 0, end = 0;
-      std::string perms = cm[3].str(), path = cm[9].str();
-
-      {
-        std::stringstream ss;
-        ss << std::hex << cm[1];
-        ss >> start;
-      }
-      {
-        std::stringstream ss;
-        ss << std::hex << cm[2];
-        ss >> end;
-      }
-
-      if (end <= start) {
-        printf("take_memory_snapshot: end <= start\n");
-        return std::nullopt;
-      }
-
-      MemoryRangeSnapshot mss;
-      mss.start = start;
-      if (perms.size() != 4) {
-        printf("take_memory_snapshot: unexpected 'perms' length\n");
-        return std::nullopt;
-      }
-      if (perms[0] == 'r')
-        mss.prot |= PROT_READ;
-      if (perms[1] == 'w')
-        mss.prot |= PROT_WRITE;
-      if (perms[2] == 'x')
-        mss.prot |= PROT_EXEC;
-
-      if (path == "[vvar]" || path == "[vdso]" || path == "[vsyscall]") {
-        continue; // do not dump these regions
-      }
-
-      if (path == "[heap]") {
-        mss.ty = MemoryRangeType::HEAP;
-      } else if (path == "[stack]") {
-        mss.ty = MemoryRangeType::STACK;
-      } else {
-        mss.ty = MemoryRangeType::DATA;
-      }
-
-      mss.data_feed = [os_pid, start, end](uint8_t *out) {
-        if (!read_process_memory(os_pid, start, end - start, out)) {
-          printf("take_memory_snapshot: unable to read process memory from %lx "
-                 "to %lx\n",
-                 start, end);
-          throw std::runtime_error(
-              "take_memory_snapshot: unable to read process memory");
-        }
-      };
-      mss.data_len = end - start;
-
-      result.push_back(std::move(mss));
-    }
-  }
-
-  return result;
-}
-
-std::shared_ptr<std::vector<uint8_t>> Process::take_snapshot() {
-  if (!allow_snapshot.load()) {
-    return {};
-  }
-
-  ProcessSnapshot snapshot;
-
-  snapshot.notify_invalid_syscall = this->notify_invalid_syscall.load();
-
-  std::vector<std::future<std::optional<user_regs_struct>>> pending_regs;
-  std::promise<void> completion;
-  std::shared_future<void> completion_fut = completion.get_future().share();
-
-  {
-    std::lock_guard<std::mutex> lg(threads_mu);
-    for (auto &[os_tid, th] : threads) {
-      auto pending =
-          std::unique_ptr<std::promise<std::optional<user_regs_struct>>>(
-              new std::promise<std::optional<user_regs_struct>>);
-      pending_regs.push_back(pending->get_future());
-
-      std::promise<user_regs_struct> pending_l2;
-      auto pending_l2_fut = std::unique_ptr<std::future<user_regs_struct>>(
-          new std::future<user_regs_struct>(pending_l2.get_future()));
-
-      {
-        auto rds = std::unique_ptr<RegisterDumpState>(new RegisterDumpState);
-        rds->sink = std::move(pending_l2);
-        rds->completion = completion_fut;
-
-        std::lock_guard<std::mutex> lg(th->register_dump_state_mu);
-        th->register_dump_state = std::move(rds);
-      }
-
-      std::thread([pending_l2_fut(std::move(pending_l2_fut)),
-                   pending(std::move(pending))]() {
-        using namespace std::chrono_literals;
-        auto status = pending_l2_fut->wait_for(1s);
-        if (status == std::future_status::ready) {
-          pending->set_value(pending_l2_fut->get());
-        } else {
-          pending->set_value(std::nullopt);
-        }
-      }).detach();
-
-      tgkill(os_pid, os_tid, SIGTRAP);
-    }
-  }
-
-  for (auto &fut : pending_regs) {
-    if (auto maybe_regs = fut.get()) {
-      auto regs = maybe_regs.value();
-      snapshot.thread_regs.push_back(regs);
-    } else {
-      completion.set_value();
-      return {};
-    }
-  }
-
-  // Now we are sure that all threads in this process have been stopped.
-  // Recheck allow_snapshot.
-  if (!allow_snapshot.load()) {
-    completion.set_value();
-    return {};
-  }
-
-  if (auto ss = take_memory_snapshot(os_pid)) {
-    snapshot.memory = std::move(ss.value());
-  } else {
-    completion.set_value();
-    return {};
-  }
-
-  snapshot.files = io_map.snapshot_files();
-
-  completion.set_value();
-
-  try {
-    return std::shared_ptr<std::vector<uint8_t>>(
-        new std::vector<uint8_t>(snapshot.serialize()));
-  } catch (std::runtime_error &e) {
-    return {};
-  }
 }
 
 void Process::kill_async() { kill(os_pid, SIGKILL); }
@@ -859,22 +679,9 @@ out:;
   }*/
 }
 
-bool Thread::register_returned_fd_after_syscall(
-    user_regs_struct &regs, const std::filesystem::path &parent_path,
-    const std::string &path, int flags) {
-  if (regs.rax >= 0) {
-    auto full_path = parent_path;
-    full_path += path;
-    process->insert_fd(regs.rax, full_path, flags);
-  }
-
-  return false; // is_invalid = false
-}
-
 TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
                                               int &stopsig_out) {
   bool is_invalid = false;
-  SyscallFixupMethod fixup_method = SyscallFixupMethod::SET_VALUE;
   long replace_value = -EPERM;
 
   long nr = regs.orig_rax;
@@ -886,27 +693,11 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
       process->sandbox_state.store(SandboxState::IN_EXEC);
       break;
     }
-    case CK_SYS_ENTER_SANDBOX: {
-      process->sandbox_state.store(SandboxState::IN_SANDBOX);
-      is_invalid = true;
-      fixup_method = SyscallFixupMethod::SET_VALUE;
-      replace_value = 0;
-      break;
-    }
     default:
       break;
     }
   else
     switch (nr) {
-    // These syscalls make the process no longer snapshotable.
-    case __NR_epoll_create:
-    case __NR_epoll_create1:
-    case __NR_socket:
-    case __NR_socketpair: {
-      process->allow_snapshot.store(false);
-      break;
-    }
-
     case __NR_uname: {
       utsname ck_utsname = {
           .sysname = "Cloudkernel",
@@ -920,8 +711,7 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
       ck_utsname.nodename[sizeof(ck_utsname.nodename) - 1] = '\0';
 
       is_invalid = true;
-      fixup_method = SyscallFixupMethod::SET_VALUE;
-      if (process->write_memory(regs.rdi, sizeof(utsname),
+      if (write_memory(regs.rdi, sizeof(utsname),
                                 (const uint8_t *)&ck_utsname))
         replace_value = 0;
       else
@@ -929,40 +719,8 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
       break;
     }
 
-    case __NR_dup3:
-    case __NR_dup2:
-    case __NR_dup: {
-      if (auto desc = process->io_map.get_file_description(regs.rdi)) {
-        auto path = desc->path;
-        int flags = desc->flags;
-        if (nr == __NR_dup3)
-          flags |= (int)regs.rdx;
-        deferred.push_back(
-            [this, path(std::move(path)), flags](user_regs_struct &regs) {
-              if (regs.rax >= 0) {
-                process->insert_fd(regs.rax, path, flags);
-              }
-              return false;
-            });
-      }
-      break;
-    }
-
-    // Silently ignore non-existent fds when deleting from iomap.
-    case __NR_close: {
-      int fd = regs.rdi;
-      deferred.push_back([this, fd](user_regs_struct &regs) {
-        if (regs.rax == 0) {
-          process->io_map.remove_file_description(fd);
-        }
-        return false;
-      });
-      break;
-    }
-
     // Only allow `clone` to create threads, but not full processes.
     case __NR_clone: {
-      process->allow_snapshot.store(false);
       static const int allowed_flags =
           CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
           CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID |
@@ -972,7 +730,6 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
       if ((regs.rdi & (~allowed_flags)) != 0 ||
           (regs.rdi & required_flags) != required_flags) {
         is_invalid = true;
-        fixup_method = SyscallFixupMethod::SET_VALUE;
         replace_value = -EPERM;
         auto ck_pid_s = stringify_ck_pid(this->process->ck_pid);
         printf("Warning: Thread %d/%d/%s is trying to call clone() with "
@@ -984,87 +741,16 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
       break;
     }
 
-    case __NR_openat: {
-      if (auto desc = process->io_map.get_file_description(regs.rdi)) {
-        if (auto maybe_path = read_c_string(regs.rsi, 65536)) {
-          std::string path = std::move(maybe_path.value());
-          int flags = regs.rdx;
-          deferred.push_back([this, dirfd(std::move(desc)),
-                              path(std::move(path)),
-                              flags](user_regs_struct &regs) {
-            return register_returned_fd_after_syscall(regs, dirfd->path, path,
-                                                      flags);
-          });
-        } else {
-          is_invalid = true;
-          fixup_method = SyscallFixupMethod::SET_VALUE;
-          replace_value = -EFAULT;
-        }
-      } else {
-        is_invalid = true;
-        fixup_method = SyscallFixupMethod::SET_VALUE;
-        replace_value = -EINVAL;
-      }
-      break;
-    }
-    case __NR_open: {
-      if (auto maybe_path = read_c_string(regs.rdi, 65536)) {
-        std::string path = std::move(maybe_path.value());
-        int flags = regs.rsi;
-        deferred.push_back(
-            [this, path(std::move(path)), flags](user_regs_struct &regs) {
-              return register_returned_fd_after_syscall(regs, {}, path, flags);
-            });
-      } else {
-        is_invalid = true;
-        fixup_method = SyscallFixupMethod::SET_VALUE;
-        replace_value = -EFAULT;
-      }
-      break;
-    }
-
     case CK_SYS_GET_ABI_VERSION: {
       is_invalid = true;
-      fixup_method = SyscallFixupMethod::SET_VALUE;
       replace_value = CK_ABI_VERSION;
-      break;
-    }
-    case CK_SYS_NOTIFY_INVALID_SYSCALL: {
-      process->notify_invalid_syscall.store(true);
-      is_invalid = true;
-      fixup_method = SyscallFixupMethod::SET_VALUE;
-      replace_value = 0;
-      break;
-    }
-    case CK_SYS_LOAD_PROCESSOR_STATE_AND_UNMAP_LOADER: {
-      user_regs_struct new_regs;
-      if (!process->read_memory(regs.rdi, sizeof(new_regs),
-                                (uint8_t *)&new_regs)) {
-        is_invalid = true;
-        fixup_method = SyscallFixupMethod::SET_VALUE;
-        replace_value = -EINVAL;
-        break;
-      }
-      regs.orig_rax = __NR_munmap;
-      regs.rdi = 0x70000000;
-      regs.rsi = 0x10000000;
-      ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
-
-      deferred.push_back([this, new_regs](user_regs_struct &regs) {
-        // FIXME: Will all registers always be set to the provided value
-        // successfully?
-        ptrace(PTRACE_SETREGS, os_tid, 0, &new_regs);
-        ptrace(PTRACE_GETREGS, os_tid, 0, &regs);
-        return false;
-      });
       break;
     }
     case CK_SYS_GETPID: {
       is_invalid = true;
-      fixup_method = SyscallFixupMethod::SET_VALUE;
 
       __uint128_t pid = process->ck_pid;
-      if (process->write_memory(regs.rdi, 16, (uint8_t *)&pid))
+      if (write_memory(regs.rdi, 16, (uint8_t *)&pid))
         replace_value = 0;
       else
         replace_value = -EFAULT;
@@ -1072,27 +758,14 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
     }
     case CK_SYS_DEBUG_PRINT_REGS: {
       is_invalid = true;
-      fixup_method = SyscallFixupMethod::SET_VALUE;
       replace_value = 0;
       print_regs(regs);
       break;
     }
     default:
-      if (permissive_mode) {
-        auto ck_pid_s = stringify_ck_pid(this->process->ck_pid);
-        printf("Warning (permissive mode): Process %d/%d/%s invoked an unknown "
-               "syscall: %lu\n",
-               this->process->os_pid, this->os_tid, ck_pid_s.c_str(), nr);
-      } else {
-        is_invalid = true;
-        if (process->notify_invalid_syscall.load()) {
-          fixup_method = SyscallFixupMethod::SEND_SIGSYS;
-        } else {
-          printf("Invalid syscall: %lu\n", nr);
-          fixup_method = SyscallFixupMethod::SET_VALUE;
-          replace_value = -EPERM;
-        }
-      }
+      is_invalid = true;
+      printf("Invalid syscall: %lu\n", nr);
+      replace_value = -EPERM;
       break;
     }
 
@@ -1118,7 +791,6 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
     for (auto it = deferred.rbegin(); it != deferred.rend(); it++) {
       is_invalid = (*it)(regs);
       if (is_invalid) {
-        fixup_method = SyscallFixupMethod::SEND_SIGSYS;
         break;
       }
     }
@@ -1130,21 +802,8 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
 
   if (stopsig == (SIGTRAP | 0x80)) {
     if (is_invalid) {
-      switch (fixup_method) {
-      case SyscallFixupMethod::SET_VALUE: {
-        regs.rax = replace_value;
-        ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
-        break;
-      }
-      case SyscallFixupMethod::SEND_SIGSYS: {
-        regs.rax = nr;
-        ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
-        tgkill(this->process->os_pid, this->os_tid, SIGSYS);
-        break;
-      }
-      default:
-        assert(false);
-      }
+      regs.rax = replace_value;
+      ptrace(PTRACE_SETREGS, os_tid, 0, &regs);
     }
   } else {
     stopsig_out = stopsig;
@@ -1215,13 +874,6 @@ TraceContinuationState Thread::handle_new_thread() {
     printf("Thread creation failed: %s\n", e.what());
   }
   return TraceContinuationState::CONTINUE;
-}
-
-void Process::insert_fd(int fd, const std::filesystem::path &path, int flags) {
-  auto desc = std::shared_ptr<FileDescription>(new FileDescription);
-  desc->path = path;
-  desc->flags = flags;
-  io_map.insert_file_description(fd, std::move(desc));
 }
 
 ProcessSet::ProcessSet() : pid_rand_gen(pid_rand_dev()) {}

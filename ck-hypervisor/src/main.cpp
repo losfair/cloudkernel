@@ -58,7 +58,7 @@ int main(int argc, const char *argv[]) {
         continue;
       }
       std::shared_ptr<Process> proc(raw_proc);
-      auto ck_pid = global_process_set.attach_process(proc);
+      global_process_set.attach_process(proc);
       proc->run();
     }
   }
