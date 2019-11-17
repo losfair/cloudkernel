@@ -42,25 +42,36 @@ bool GlobalProfile::parse(const std::string &_input) {
       p->storage_groups = v["storage_groups"].get<std::set<std::string>>();
       p->rootfs_profile = v["rootfs_profile"].get<std::string>();
 
-      if (auto generic_ipv4_address = v["ipv4_address"];
-          !generic_ipv4_address.is_null()) {
-        auto ipv4_address = generic_ipv4_address.get<std::string>();
-        if (auto addr = decode_ipv4_address(ipv4_address.c_str())) {
-          p->ipv4_address = addr;
-        } else {
-          throw std::runtime_error("invalid ipv4 address");
+      if (auto network = v["network"]; !network.is_null()) {
+        p->network = std::shared_ptr<AppNetworkProfile>(new AppNetworkProfile);
+
+        if (auto generic_ipv4_address = network["ipv4_address"];
+            !generic_ipv4_address.is_null()) {
+          auto ipv4_address = generic_ipv4_address.get<std::string>();
+          if (auto addr = decode_ipv4_address(ipv4_address.c_str())) {
+            p->network->ipv4_address = addr;
+          } else {
+            throw std::runtime_error("invalid ipv4 address");
+          }
+        }
+
+        if (auto generic_ipv6_address = network["ipv6_address"];
+            !generic_ipv6_address.is_null()) {
+          auto ipv6_address = generic_ipv6_address.get<std::string>();
+          if (auto addr = decode_ipv6_address(ipv6_address.c_str())) {
+            p->network->ipv6_address = addr;
+          } else {
+            throw std::runtime_error("invalid ipv6 address");
+          }
+        }
+
+        if (auto no_source_verification = network["no_source_verification"];
+            !no_source_verification.is_null()) {
+          p->network->no_source_verification =
+              no_source_verification.get<bool>();
         }
       }
 
-      if (auto generic_ipv6_address = v["ipv6_address"];
-          !generic_ipv6_address.is_null()) {
-        auto ipv6_address = generic_ipv6_address.get<std::string>();
-        if (auto addr = decode_ipv6_address(ipv6_address.c_str())) {
-          p->ipv6_address = addr;
-        } else {
-          throw std::runtime_error("invalid ipv6 address");
-        }
-      }
       apps[k] = std::move(p);
     }
     auto raw_rootfs_profiles =

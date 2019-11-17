@@ -94,16 +94,16 @@ void Process::run_as_child(int socket) {
     printf("unable to configure interface\n");
     exit(1);
   }
-  if (profile->ipv4_address) {
-    auto addr = encode_ipv4_address(*profile->ipv4_address);
+  if (profile->network && profile->network->ipv4_address) {
+    auto addr = encode_ipv4_address(*profile->network->ipv4_address);
     if (forked_call_external(
             "ip", {"ip", "addr", "add", addr.c_str(), "dev", "access"}) != 0) {
       printf("unable to set ipv4 address\n");
       exit(1);
     }
   }
-  if (profile->ipv6_address) {
-    auto addr = encode_ipv6_address(*profile->ipv6_address);
+  if (profile->network && profile->network->ipv6_address) {
+    auto addr = encode_ipv6_address(*profile->network->ipv6_address);
     if (forked_call_external("ip", {"ip", "-6", "addr", "add", addr.c_str(),
                                     "dev", "access"}) != 0) {
       printf("unable to set ipv6 address\n");
@@ -285,9 +285,11 @@ static int child_start(void *arg) {
 static void insert_route(__uint128_t ck_pid, IPAddress unified_addr) {
   auto ep = std::shared_ptr<RoutingEndpoint>(new RoutingEndpoint);
   ep->ck_pid = ck_pid;
-  ep->on_packet = [unified_addr, ck_pid](uint8_t *packet, size_t len) {
+  ep->on_packet = [unified_addr, ck_pid](uint8_t *header, size_t header_len,
+                                         volatile uint8_t *body,
+                                         size_t body_len) {
     if (auto proc = global_process_set.get_process(ck_pid)) {
-      proc->input_ip_packet(packet, len);
+      proc->input_ip_packet(header, header_len, body, body_len);
     } else {
       global_router.unregister_route(unified_addr, ck_pid);
     }
@@ -295,33 +297,44 @@ static void insert_route(__uint128_t ck_pid, IPAddress unified_addr) {
   global_router.register_route(unified_addr, std::move(ep));
 }
 
-void Process::input_ip_packet(const uint8_t *data, size_t len) {
+void Process::input_ip_packet(uint8_t *header, size_t header_len,
+                              volatile uint8_t *body, size_t body_len) {
   std::lock_guard<std::mutex> lg(ip_queue_mu);
   if (ip_send_queue && ip_send_queue->can_push()) {
     uint8_t *place = ip_send_queue->get_data_ptr();
-    size_t send_len =
-        len < SharedQueue::data_size() ? len : SharedQueue::data_size();
-    std::copy(data, data + send_len, place);
-    ip_send_queue->push(send_len);
+    size_t remain_cap = SharedQueue::data_size();
+
+    if (remain_cap < header_len)
+      return;
+    remain_cap -= header_len;
+    std::copy(header, header + header_len, place);
+
+    size_t body_send_len = body_len < remain_cap ? body_len : remain_cap;
+    std::copy(body, body + body_send_len, place + header_len);
+    ip_send_queue->push(header_len + body_send_len);
   }
   // drop otherwise
 }
 
 void Process::run() {
-  if (profile->ipv4_address) {
-    __uint128_t unified_addr =
-        ((__uint128_t)0xffff00000000ull) | (__uint128_t)*profile->ipv4_address;
-    insert_route(ck_pid, unified_addr);
-    add_awaiter([ck_pid(this->ck_pid), unified_addr]() {
-      global_router.unregister_route(unified_addr, ck_pid);
-    });
+  if (profile->network) {
+    if (profile->network->ipv4_address) {
+      __uint128_t unified_addr = ((__uint128_t)0xffff00000000ull) |
+                                 (__uint128_t)*profile->network->ipv4_address;
+      insert_route(ck_pid, unified_addr);
+      add_awaiter([ck_pid(this->ck_pid), unified_addr]() {
+        global_router.unregister_route(unified_addr, ck_pid);
+      });
+    }
+    if (profile->network->ipv6_address) {
+      insert_route(ck_pid, *profile->network->ipv6_address);
+      add_awaiter([ck_pid(this->ck_pid),
+                   unified_addr(*profile->network->ipv6_address)]() {
+        global_router.unregister_route(unified_addr, ck_pid);
+      });
+    }
   }
-  if (profile->ipv6_address) {
-    insert_route(ck_pid, *profile->ipv6_address);
-    add_awaiter([ck_pid(this->ck_pid), unified_addr(*profile->ipv6_address)]() {
-      global_router.unregister_route(unified_addr, ck_pid);
-    });
-  }
+
   int sockets[2];
 
   if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) < 0) {

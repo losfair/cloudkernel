@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <ck-hypervisor/byteutils.h>
 #include <ck-hypervisor/external.h>
 #include <ck-hypervisor/network.h>
@@ -24,24 +25,62 @@ static const char *dev_name = "tun-cloudkernel";
 // (mutex contention?)
 Router global_router(1);
 
-static std::optional<IPAddress>
-extract_destination_address_from_packet(const uint8_t *data, size_t len) {
+struct PacketMetadata {
+  bool is_ipv6 = false;
+  IPAddress src_addr = 0;
+  IPAddress dst_addr = 0;
+  size_t header_size = 0;
+  uint8_t header[40] = {};
+};
+
+static inline IPAddress decode_packet_ipv4(volatile uint8_t *data) {
+  uint32_t addr = *(uint32_t *)data;
+  std::reverse((uint8_t *)&addr, (uint8_t *)(&addr + 1));
+  return ((__uint128_t)0xffff00000000ull) | (__uint128_t)addr;
+}
+
+static inline IPAddress decode_packet_ipv6(volatile uint8_t *data) {
+  __uint128_t addr = *(__uint128_t *)data;
+  std::reverse((uint8_t *)&addr, (uint8_t *)(&addr + 1));
+  return addr;
+}
+
+// `decode_packet_header` is designed to prevent the TOCTOU problem with
+// untrusted input.
+static std::optional<PacketMetadata>
+decode_packet_header(volatile uint8_t *unsafe_data, size_t len) {
   if (len < 1)
     return std::nullopt;
-  switch (data[0] >> 4) {
+
+  PacketMetadata md;
+
+  uint8_t ty = (unsafe_data[0] >> 4);
+  switch (ty) {
   case 4: {
     if (len < 20)
       return std::nullopt;
-    uint32_t addr = *(uint32_t *)&data[16];
-    std::reverse((uint8_t *)&addr, ((uint8_t *)&addr) + 4);
-    return ((__uint128_t)0xffff00000000ull) | (__uint128_t)addr;
+    std::copy(unsafe_data, unsafe_data + 20, md.header);
+    if ((md.header[0] >> 4) != ty)
+      return std::nullopt;
+
+    md.is_ipv6 = false;
+    md.src_addr = decode_packet_ipv4(&md.header[12]);
+    md.dst_addr = decode_packet_ipv4(&md.header[16]);
+    md.header_size = 20;
+    return md;
   }
   case 6: {
     if (len < 40)
       return std::nullopt;
-    __uint128_t addr = *(__uint128_t *)&data[24];
-    std::reverse((uint8_t *)&addr, ((uint8_t *)&addr) + 16);
-    return addr;
+    std::copy(unsafe_data, unsafe_data + 40, md.header);
+    if ((md.header[0] >> 4) != ty)
+      return std::nullopt;
+
+    md.is_ipv6 = true;
+    md.src_addr = decode_packet_ipv6(&md.header[8]);
+    md.dst_addr = decode_packet_ipv6(&md.header[24]);
+    md.header_size = 40;
+    return md;
   }
   default:
     return std::nullopt;
@@ -116,28 +155,48 @@ void Router::unregister_route(IPAddress addr, __uint128_t ck_pid) {
   }
 }
 
-void Router::dispatch_packet(uint8_t *data, size_t len) {
-  IPAddress addr;
-  if (auto maybe_addr = extract_destination_address_from_packet(data, len)) {
-    addr = maybe_addr.value();
+void Router::dispatch_packet(volatile uint8_t *unsafe_data, size_t len,
+                             std::shared_ptr<AppNetworkProfile> profile) {
+  PacketMetadata metadata;
+  if (auto maybe_md = decode_packet_header(unsafe_data, len)) {
+    metadata = maybe_md.value();
   } else {
     return;
+  }
+
+  if (profile) {
+    if (!profile->no_source_verification) {
+      if (!metadata.is_ipv6 &&
+          (!profile->ipv4_address ||
+           *profile->ipv4_address != (uint32_t)metadata.src_addr))
+        return;
+      if (metadata.is_ipv6 && (!profile->ipv6_address ||
+                               *profile->ipv6_address != metadata.src_addr))
+        return;
+    }
   }
 
   std::shared_ptr<RoutingEndpoint> endpoint;
 
   {
     std::shared_lock<std::shared_mutex> lg(routes_mu);
-    if (auto it = routes.find(addr); it != routes.end()) {
+    if (auto it = routes.find(metadata.dst_addr); it != routes.end()) {
       endpoint = it->second;
     }
   }
 
   if (endpoint) {
     if (endpoint->on_packet)
-      endpoint->on_packet(data, len);
+      endpoint->on_packet(metadata.header, metadata.header_size,
+                          unsafe_data + metadata.header_size,
+                          len - metadata.header_size);
   } else {
-    choose_tun()->write(data, len); // packet to outside
+    iovec iov[2];
+    iov[0].iov_base = (void *)metadata.header;
+    iov[0].iov_len = metadata.header_size;
+    iov[1].iov_base = (void *)(unsafe_data + metadata.header_size);
+    iov[1].iov_len = len - metadata.header_size;
+    choose_tun()->writev(iov, 2); // packet to outside
   }
 }
 
@@ -185,6 +244,14 @@ int Tun::write(const uint8_t *packet, size_t len) {
 }
 
 int Tun::read(uint8_t *packet, size_t len) { return ::read(fd, packet, len); }
+
+int Tun::writev(const iovec *iov, int iovcnt) {
+  return ::writev(fd, iov, iovcnt);
+}
+
+int Tun::readv(const iovec *iov, int iovcnt) {
+  return ::readv(fd, iov, iovcnt);
+}
 
 static int futex(int *uaddr, int futex_op, int val,
                  const struct timespec *timeout, int *uaddr2, int val3) {

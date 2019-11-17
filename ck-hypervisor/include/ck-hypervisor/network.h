@@ -2,12 +2,14 @@
 
 #include <array>
 #include <atomic>
+#include <ck-hypervisor/profile.h>
 #include <ck-hypervisor/shmem.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stdint.h>
+#include <sys/uio.h>
 #include <unordered_map>
 
 class Tun {
@@ -20,13 +22,15 @@ public:
   virtual ~Tun();
   int write(const uint8_t *packet, size_t len);
   int read(uint8_t *packet, size_t len);
+  int writev(const iovec *iov, int iovcnt);
+  int readv(const iovec *iov, int iovcnt);
 };
 
 class RoutingEndpoint {
 public:
   __uint128_t ck_pid; // used for identifying endpoint ownership
 
-  std::function<void(uint8_t *, size_t)> on_packet;
+  std::function<void(uint8_t *, size_t, volatile uint8_t *, size_t)> on_packet;
   std::function<void()> on_destroy;
 
   ~RoutingEndpoint() {
@@ -52,7 +56,8 @@ public:
   void register_route(IPAddress addr,
                       std::shared_ptr<RoutingEndpoint> &&endpoint);
   void unregister_route(IPAddress addr, __uint128_t ck_pid);
-  void dispatch_packet(uint8_t *data, size_t len);
+  void dispatch_packet(volatile uint8_t *data, size_t len,
+                       std::shared_ptr<AppNetworkProfile> profile = nullptr);
 };
 
 extern Router global_router;

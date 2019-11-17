@@ -152,7 +152,8 @@ public:
   void add_awaiter(std::function<void()> &&awaiter);
   void kill_async();
   bool has_capability(const char *cap);
-  void input_ip_packet(const uint8_t *data, size_t len);
+  void input_ip_packet(uint8_t *header, size_t header_len,
+                       volatile uint8_t *body, size_t body_len);
 
   friend class Thread;
 };
