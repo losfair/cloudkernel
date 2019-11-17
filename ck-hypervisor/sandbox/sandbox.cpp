@@ -208,6 +208,14 @@ static void init_seccomp_rules() {
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(lstat), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getpgrp), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(pselect6), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(gettimeofday), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getrusage), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(setpgid), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(kill), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(select), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(wait4), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(statfs), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(tgkill), 0);
 
   // random
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getrandom), 0);
@@ -223,8 +231,44 @@ static void init_seccomp_rules() {
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(epoll_create), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(epoll_create1), 0);
   seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(socket), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mkdir), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rmdir), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(creat), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(link), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(unlink), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(symlink), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(chmod), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(chdir), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(chown), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(lchown), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(umask), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(eventfd2), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(eventfd), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(pipe), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(pipe2), 0);
+  seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(truncate), 0);
 
   // General I/O.
+  SCMP_SETUP_FILE_IO(ctx, fallocate);
+  SCMP_SETUP_FILE_IO(ctx, ftruncate);
+  SCMP_SETUP_FILE_IO(ctx, fsync);
+  SCMP_SETUP_FILE_IO(ctx, fdatasync);
+  SCMP_SETUP_FILE_IO(ctx, pread64);
+  SCMP_SETUP_FILE_IO(ctx, pwrite64);
+  SCMP_SETUP_FILE_IO(ctx, flock);
+  SCMP_SETUP_FILE_IO(ctx, mkdirat);
+  SCMP_SETUP_FILE_IO(ctx, fchownat);
+  SCMP_SETUP_FILE_IO(ctx, unlinkat);
+  SCMP_SETUP_FILE_IO(ctx, linkat);
+  SCMP_SETUP_FILE_IO(ctx, renameat);
+  SCMP_SETUP_FILE_IO(ctx, preadv);
+  SCMP_SETUP_FILE_IO(ctx, pwritev);
+  SCMP_SETUP_FILE_IO(ctx, preadv2);
+  SCMP_SETUP_FILE_IO(ctx, pwritev2);
+  SCMP_SETUP_FILE_IO(ctx, poll);
+  SCMP_SETUP_FILE_IO(ctx, fchmod);
+  SCMP_SETUP_FILE_IO(ctx, fchdir);
+  SCMP_SETUP_FILE_IO(ctx, fchown);
   SCMP_SETUP_FILE_IO(ctx, dup3);
   SCMP_SETUP_FILE_IO(ctx, dup2);
   SCMP_SETUP_FILE_IO(ctx, dup);
@@ -258,6 +302,7 @@ static void init_seccomp_rules() {
   SCMP_SETUP_FILE_IO(ctx, setsockopt);
   SCMP_SETUP_FILE_IO(ctx, accept);
   SCMP_SETUP_FILE_IO(ctx, accept4);
+  SCMP_SETUP_FILE_IO(ctx, signalfd4);
   SCMP_SETUP_FILE_IO(ctx, connect);
   SCMP_SETUP_FILE_IO(ctx, listen);
   SCMP_SETUP_FILE_IO(ctx, bind);

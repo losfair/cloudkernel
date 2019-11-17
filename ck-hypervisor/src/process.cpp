@@ -36,6 +36,9 @@
 #include <thread>
 #include <unistd.h>
 
+static const int SANDBOX_GID = 100000;
+static const int SANDBOX_UID = 100000;
+
 static int forked_setuid(uid_t uid) { return syscall(__NR_setuid, uid); }
 
 static int forked_setgid(gid_t gid) { return syscall(__NR_setgid, gid); }
@@ -115,6 +118,16 @@ void Process::run_as_child(int socket) {
     }
   }
 
+  {
+    std::stringstream ss;
+    ss << "uid=" << SANDBOX_UID << ",gid=" << SANDBOX_GID;
+    std::string options = ss.str();
+    if(mount("tmpfs", rootfs_path.c_str(), "tmpfs", 0, (void *) options.c_str()) < 0) {
+      printf("cannot mount rootfs\n");
+      exit(1);
+    }
+  }
+
   for (auto &p : rootfs_profile->mounts) {
     unsigned long flags = 0;
     if (p.is_bind)
@@ -125,6 +138,11 @@ void Process::run_as_child(int socket) {
     std::filesystem::path target_path = rootfs_path;
     target_path += "/";
     target_path += p.target;
+
+    if (mkdir(target_path.c_str(), 0755) < 0) {
+      printf("Mountpoint creation failed: %s\n", target_path.c_str());
+      exit(1);
+    }
 
     if (mount(p.source.c_str(), target_path.c_str(), p.fstype.c_str(), flags,
               nullptr) < 0) {
@@ -153,7 +171,7 @@ void Process::run_as_child(int socket) {
   else
     chdir("/");
 
-  if (forked_setgid(65534) != 0 || forked_setuid(65534) != 0) {
+  if (forked_setgid(SANDBOX_GID) != 0 || forked_setuid(SANDBOX_UID) != 0) {
     printf("unable to drop permissions\n");
     exit(1);
   }
@@ -349,16 +367,6 @@ void Process::run() {
     throw std::runtime_error("unable to create rootfs");
   }
 
-  for (auto &p : rootfs_profile->mounts) {
-    auto path = rootfs_path;
-    path += "/";
-    path += p.target;
-    if (mkdir(path.c_str(), 0755) < 0) {
-      printf("Mountpoint creation failed: %s\n", path.c_str());
-      throw std::runtime_error("unable to create mountpoint");
-    }
-  }
-
   std::promise<void> child_pid;
   std::future<void> child_pid_fut = child_pid.get_future();
 
@@ -462,9 +470,16 @@ Process::~Process() {
     }
   }
 
-  if (call_external("rm", {"rm", "-rf", storage_path.c_str()}) != 0) {
-    printf("Warning: Unable to remove temporary storage at %s\n",
-           storage_path.c_str());
+  if(umount2(rootfs_path.c_str(), MNT_DETACH) < 0) {
+    printf("Warning: Unable to call umount2() on rootfs\n");
+  }
+
+  if (rmdir(rootfs_path.c_str()) != 0) {
+    printf("Warning: Unable to remove rootfs\n");
+  }
+
+  if (rmdir(storage_path.c_str()) != 0) {
+    printf("Warning: Unable to remove storage\n");
   }
 }
 
@@ -719,16 +734,14 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
       break;
     }
 
-    // Only allow `clone` to create threads, but not full processes.
     case __NR_clone: {
+      /*
       static const int allowed_flags =
           CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
           CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID |
           CLONE_CHILD_CLEARTID | CLONE_DETACHED;
-      static const int required_flags = CLONE_VM | CLONE_THREAD;
 
-      if ((regs.rdi & (~allowed_flags)) != 0 ||
-          (regs.rdi & required_flags) != required_flags) {
+      if ((regs.rdi & (~allowed_flags)) != 0) {
         is_invalid = true;
         replace_value = -EPERM;
         auto ck_pid_s = stringify_ck_pid(this->process->ck_pid);
@@ -737,7 +750,10 @@ TraceContinuationState Thread::handle_syscall(user_regs_struct regs,
                this->process->os_pid, this->os_tid, ck_pid_s.c_str());
         break;
       } else {
-      }
+      }*/
+      break;
+    }
+    case __NR_execve: {
       break;
     }
 
